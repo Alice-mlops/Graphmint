@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "graphmint"
+version = "0.1.0"
+description = "Graph learning and shortest-path tooling for Pilgrim and Pilgrim Lightning."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aim",
+    "cayleypy @ git+https://github.com/cayleypy/cayleypy.git@e1518b6",
+    "h5py",
+    "kaggle",
+    "kagglehub",
+    "lightning",
+    "matplotlib",
+    "numba",
+    "numpy",
+    "pandas",
+    "pydantic>=2",
+    "pyyaml",
+    "scikit-learn",
+    "torch>=2.9.0",
+    "tqdm",
+]
+
+[project.urls]
+Repository = "https://github.com/Alice-mlops/Graphmint"
+
+[project.scripts]
+pilgrim-lightning = "pilgrim_lightning.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
