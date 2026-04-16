@@ -15,16 +15,19 @@ from .multistep_td_value_iteration import (
     TDReplayBufferConfig,
 )
 from .parallel import TDSecondaryGpuEvalConfig
+from .tracking import TDFileTrackerConfig, TDProbeEvaluationConfig
 
 __all__ = [
     "MultiStepTDValueConfig",
     "MultiStepTDValueLossState",
     "MultiStepTDValueMetrics",
     "MultiStepTDValueStepDiagnostics",
-    "TDSecondaryGpuEvalConfig",
+    "TDFileTrackerConfig",
     "TDFrontierArchiveConfig",
     "TDLearningRateSchedulerConfig",
     "TDLipschitzPenaltyConfig",
+    "TDProbeEvaluationConfig",
     "TDRandomWalkSamplingConfig",
     "TDReplayBufferConfig",
+    "TDSecondaryGpuEvalConfig",
 ]

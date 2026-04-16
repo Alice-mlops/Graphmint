@@ -8,13 +8,16 @@ from ..schemas.rl import (
     MultiStepTDValueLossState,
     MultiStepTDValueMetrics,
     MultiStepTDValueStepDiagnostics,
-    TDSecondaryGpuEvalConfig,
+    TDFileTrackerConfig,
     TDFrontierArchiveConfig,
     TDLearningRateSchedulerConfig,
     TDLipschitzPenaltyConfig,
+    TDProbeEvaluationConfig,
     TDRandomWalkSamplingConfig,
     TDReplayBufferConfig,
+    TDSecondaryGpuEvalConfig,
 )
+from .composite_tracking import CompositeMultiStepTDValueTracker
 from .config import (
     FittedValueIterationConfig,
     FrontierArchiveConfig,
@@ -22,6 +25,7 @@ from .config import (
     RandomWalkSamplingConfig,
     ReplayBufferConfig,
 )
+from .file_tracking import TDFileMetricsTracker
 from .fitted_value_iteration import (
     FittedValueIterationLossState,
     FittedValueIterationMetrics,
@@ -43,6 +47,7 @@ from .transitions import (
 )
 
 __all__ = [
+    "CompositeMultiStepTDValueTracker",
     "FittedValueIterationConfig",
     "FittedValueIterationLossState",
     "FittedValueIterationMetrics",
@@ -56,16 +61,19 @@ __all__ = [
     "MultiStepTDValueLossState",
     "MultiStepTDValueMetrics",
     "MultiStepTDValueStepDiagnostics",
-    "TDSecondaryGpuEvalConfig",
     "MultiStepTDValueTracker",
     "MultiStepTDValueTrainer",
     "RandomWalkSamplingConfig",
     "ReplayBufferConfig",
+    "TDFileMetricsTracker",
+    "TDFileTrackerConfig",
     "TDFrontierArchiveConfig",
     "TDLearningRateSchedulerConfig",
     "TDLipschitzPenaltyConfig",
+    "TDProbeEvaluationConfig",
     "TDRandomWalkSamplingConfig",
     "TDReplayBufferConfig",
+    "TDSecondaryGpuEvalConfig",
     "TensorReplayBuffer",
     "combine_truncated_td_lambda_targets",
     "compute_bellman_value_targets",
