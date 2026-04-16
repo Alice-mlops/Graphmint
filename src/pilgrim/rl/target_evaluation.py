@@ -183,13 +183,14 @@ class _EvaluatorReplica:
             settings: Immutable target-construction settings.
 
         Returns:
-            One-dimensional tensor of TD targets on ``states.device``.
+            One-dimensional tensor of TD targets on ``self.device``.
 
         """
+        replica_states = torch.as_tensor(states, device=self.device).long()
         return compute_configured_value_targets(
             target_model=self.target_model,
             graph=self.graph,
-            states=states,
+            states=replica_states,
             reward_per_step=settings.reward_per_step,
             discount=settings.discount,
             n_steps=settings.n_steps,
