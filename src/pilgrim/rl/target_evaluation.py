@@ -391,6 +391,11 @@ def _clone_graph_to_device(
 
     """
     target_device = torch.device(device)
+    if _is_cayleypy_graph_instance(graph):
+        return _rebuild_cayleypy_graph_on_device(
+            graph=graph,
+            target_device=target_device,
+        )
     if hasattr(graph, "modified_copy") and hasattr(graph, "definition"):
         return _clone_graph_via_modified_copy(
             graph=graph,
@@ -436,6 +441,73 @@ def _clone_graph_via_modified_copy(
     # device, so we select the target device before cloning.
     with torch.cuda.device(target_device):
         return graph.modified_copy(graph.definition, device="cuda")
+
+
+def _is_cayleypy_graph_instance(graph: object) -> bool:
+    """
+    Return whether ``graph`` looks like a CayleyPy ``CayleyGraph`` instance.
+
+    Args:
+        graph: Candidate graph object.
+
+    Returns:
+        True when the object appears to be a CayleyPy graph.
+
+    """
+    return type(graph).__module__.startswith("cayleypy.")
+
+
+def _rebuild_cayleypy_graph_on_device(
+    *,
+    graph: CayleyGraph,
+    target_device: torch.device,
+) -> CayleyGraph:
+    """
+    Reconstruct a CayleyPy graph on a new device with a fresh device-local hasher.
+
+    Args:
+        graph: Source CayleyPy graph.
+        target_device: Destination PyTorch device.
+
+    Returns:
+        Reconstructed CayleyPy graph on ``target_device``.
+
+    """
+    constructor_kwargs = {
+        "device": (
+            str(target_device)
+            if target_device.type != "cuda"
+            else _cayleypy_cuda_device_string(target_device)
+        ),
+        "dtype": graph.dtype,
+        "random_seed": getattr(graph.hasher, "seed", None),
+        "bit_encoding_width": getattr(graph, "bit_encoding_width", None),
+        "verbose": getattr(graph, "verbose", 0),
+        "batch_size": getattr(graph, "batch_size", 2**20),
+        "hash_chunk_size": getattr(graph.hasher, "chunk_size", 2**16),
+        "memory_limit_gb": getattr(graph, "memory_limit_bytes", 16 * (2**30))
+        / float(2**30),
+    }
+    if target_device.type != "cuda":
+        return graph.__class__(graph.definition, **constructor_kwargs)
+
+    with torch.cuda.device(target_device):
+        return graph.__class__(graph.definition, **constructor_kwargs)
+
+
+def _cayleypy_cuda_device_string(target_device: torch.device) -> str:
+    """
+    Return the device string accepted by CayleyPy for a CUDA target device.
+
+    Args:
+        target_device: Destination CUDA device.
+
+    Returns:
+        The string device value to pass into CayleyPy.
+
+    """
+    del target_device
+    return "cuda"
 
 
 def _cpu_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
