@@ -490,10 +490,14 @@ def _rebuild_cayleypy_graph_on_device(
         / float(2**30),
     }
     if target_device.type != "cuda":
-        return graph.__class__(graph.definition, **constructor_kwargs)
+        rebuilt_graph = graph.__class__(graph.definition, **constructor_kwargs)
+        rebuilt_graph.device = target_device
+        return rebuilt_graph
 
     with torch.cuda.device(target_device):
-        return graph.__class__(graph.definition, **constructor_kwargs)
+        rebuilt_graph = graph.__class__(graph.definition, **constructor_kwargs)
+    rebuilt_graph.device = target_device
+    return rebuilt_graph
 
 
 def _cayleypy_cuda_device_string(target_device: torch.device) -> str:
