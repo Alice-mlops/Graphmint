@@ -392,7 +392,10 @@ def _clone_graph_to_device(
     """
     target_device = torch.device(device)
     if hasattr(graph, "modified_copy") and hasattr(graph, "definition"):
-        return graph.modified_copy(graph.definition, device=target_device)
+        return _clone_graph_via_modified_copy(
+            graph=graph,
+            target_device=target_device,
+        )
 
     graph_copy = copy.deepcopy(graph)
     if hasattr(graph_copy, "device"):
@@ -408,6 +411,31 @@ def _clone_graph_to_device(
             device=target_device,
         ).clone()
     return graph_copy
+
+
+def _clone_graph_via_modified_copy(
+    *,
+    graph: CayleyGraph,
+    target_device: torch.device,
+) -> CayleyGraph:
+    """
+    Clone a graph with ``modified_copy`` while respecting CayleyPy device rules.
+
+    Args:
+        graph: Source graph that exposes ``modified_copy``.
+        target_device: Destination PyTorch device.
+
+    Returns:
+        Graph replica on ``target_device``.
+
+    """
+    if target_device.type != "cuda":
+        return graph.modified_copy(graph.definition, device=target_device)
+
+    # CayleyPy accepts only ``"cuda"`` and binds allocations to the current CUDA
+    # device, so we select the target device before cloning.
+    with torch.cuda.device(target_device):
+        return graph.modified_copy(graph.definition, device="cuda")
 
 
 def _cpu_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
