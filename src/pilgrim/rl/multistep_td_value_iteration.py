@@ -965,7 +965,7 @@ class MultiStepTDValueTrainer:
             local_rank = int(local_rank_from_env())
             if str(device).lower() == "auto":
                 if self.graph_device.type == "cuda":
-                    return self.graph_device
+                    return torch.device(f"cuda:{local_rank}")
                 return torch.device(f"cuda:{local_rank}")
             requested = torch.device(device)
             if requested.type == "cuda":
