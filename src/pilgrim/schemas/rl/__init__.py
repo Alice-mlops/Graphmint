@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from .distributed_run import DistributedMultiStepTDRunSpec
 from .multistep_td_value_iteration import (
     MultiStepTDValueConfig,
     MultiStepTDValueLossState,
@@ -14,10 +15,11 @@ from .multistep_td_value_iteration import (
     TDRandomWalkSamplingConfig,
     TDReplayBufferConfig,
 )
-from .parallel import TDSecondaryGpuEvalConfig
+from .parallel import TDParallelConfig, TDSecondaryGpuEvalConfig
 from .tracking import TDFileTrackerConfig, TDProbeEvaluationConfig
 
 __all__ = [
+    "DistributedMultiStepTDRunSpec",
     "MultiStepTDValueConfig",
     "MultiStepTDValueLossState",
     "MultiStepTDValueMetrics",
@@ -26,6 +28,7 @@ __all__ = [
     "TDFrontierArchiveConfig",
     "TDLearningRateSchedulerConfig",
     "TDLipschitzPenaltyConfig",
+    "TDParallelConfig",
     "TDProbeEvaluationConfig",
     "TDRandomWalkSamplingConfig",
     "TDReplayBufferConfig",

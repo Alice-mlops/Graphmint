@@ -8,7 +8,7 @@ from typing import Any
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .parallel import TDSecondaryGpuEvalConfig
+from .parallel import TDParallelConfig
 
 
 class TDReplayBufferConfig(BaseModel):
@@ -231,7 +231,7 @@ class MultiStepTDValueConfig(BaseModel):
         sampling: Random-walk replay-sampling configuration.
         frontier: Optional frontier-archive configuration.
         lipschitz: Optional Lipschitz-penalty configuration.
-        parallel: Secondary-GPU evaluation runtime settings.
+        parallel: GPU parallelization settings.
 
     Raises:
         ValueError: If replay settings exceed replay capacity.
@@ -269,7 +269,7 @@ class MultiStepTDValueConfig(BaseModel):
     lipschitz: TDLipschitzPenaltyConfig = Field(
         default_factory=TDLipschitzPenaltyConfig
     )
-    parallel: TDSecondaryGpuEvalConfig = Field(default_factory=TDSecondaryGpuEvalConfig)
+    parallel: TDParallelConfig = Field(default_factory=TDParallelConfig)
 
     @property
     def target_mode(self) -> str:
@@ -299,6 +299,20 @@ class MultiStepTDValueConfig(BaseModel):
             raise ValueError("replay.min_size cannot exceed replay.capacity.")
         if int(self.replay.warmstart_size) > int(self.replay.capacity):
             raise ValueError("replay.warmstart_size cannot exceed replay.capacity.")
+        if self.parallel.uses_ddp and int(self.replay.batch_size) % int(
+            self.parallel.world_size
+        ) != 0:
+            raise ValueError(
+                "replay.batch_size must be divisible by parallel.num_gpus in DDP mode."
+            )
+        if (
+            self.parallel.uses_ddp
+            and int(self.frontier.batch_size) > 0
+            and int(self.frontier.batch_size) % int(self.parallel.world_size) != 0
+        ):
+            raise ValueError(
+                "frontier.batch_size must be divisible by parallel.num_gpus in DDP mode."
+            )
         return self
 
     def to_log_dict(self) -> dict[str, Any]:
@@ -369,7 +383,9 @@ class MultiStepTDValueConfig(BaseModel):
             "lipschitz.seed": self.lipschitz.seed,
             "lipschitz.state_batch_size": self.lipschitz.state_batch_size,
             "lipschitz.reduction": str(self.lipschitz.reduction),
+            "parallel.mode": str(self.parallel.resolved_mode),
             "parallel.num_gpus": int(self.parallel.num_gpus),
+            "parallel.backend": str(self.parallel.backend),
         }
 
 
@@ -430,6 +446,14 @@ class MultiStepTDValueStepDiagnostics(BaseModel):
         replay_fill_ratio: Fraction of replay capacity currently filled.
         learning_rate: Optimizer learning rate used for the step.
         step_time_s: Wall-clock duration of the optimizer step.
+        replay_refresh_time_s: Time spent appending replay states.
+        frontier_refresh_time_s: Time spent refreshing the frontier archive.
+        batch_sample_time_s: Time spent sampling the optimizer batch.
+        target_compute_time_s: Time spent constructing frozen TD targets.
+        model_forward_time_s: Time spent in the online forward pass.
+        backward_time_s: Time spent in ``loss.backward()``.
+        optimizer_time_s: Time spent in gradient clipping, optimizer step, and
+            LR scheduler stepping.
         gradient_global_norm: Global L2 norm across all gradients.
         gradient_max_abs: Maximum absolute gradient entry.
         target_sync_applied: Whether the target network was synchronized.
@@ -466,6 +490,13 @@ class MultiStepTDValueStepDiagnostics(BaseModel):
     replay_fill_ratio: float = Field(..., ge=0.0, le=1.0)
     learning_rate: float
     step_time_s: float = Field(..., ge=0.0)
+    replay_refresh_time_s: float = Field(0.0, ge=0.0)
+    frontier_refresh_time_s: float = Field(0.0, ge=0.0)
+    batch_sample_time_s: float = Field(0.0, ge=0.0)
+    target_compute_time_s: float = Field(0.0, ge=0.0)
+    model_forward_time_s: float = Field(0.0, ge=0.0)
+    backward_time_s: float = Field(0.0, ge=0.0)
+    optimizer_time_s: float = Field(0.0, ge=0.0)
     gradient_global_norm: float | None = None
     gradient_max_abs: float | None = None
     target_sync_applied: bool

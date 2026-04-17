@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Protocol
 import torch
 from torch import nn
 
+from .distributed import cpu_model_state_dict
 from .transitions import compute_configured_value_targets
 
 if TYPE_CHECKING:
@@ -526,9 +527,7 @@ def _cpu_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
         CPU-cloned state dictionary.
 
     """
-    return {
-        key: value.detach().cpu().clone() for key, value in model.state_dict().items()
-    }
+    return cpu_model_state_dict(model)
 
 
 def _normalize_state_rows(states: torch.Tensor) -> torch.Tensor:

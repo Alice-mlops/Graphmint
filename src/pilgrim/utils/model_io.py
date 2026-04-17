@@ -8,13 +8,15 @@ from typing import Any, TypeVar
 
 import torch
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel
 
 TModel = TypeVar("TModel", bound=nn.Module)
 
 
 def _cpu_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
     """Return a CPU-cloned copy of ``model.state_dict()``."""
-    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+    source = model.module if isinstance(model, DistributedDataParallel) else model
+    return {k: v.detach().cpu().clone() for k, v in source.state_dict().items()}
 
 
 def save_one(

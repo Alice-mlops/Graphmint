@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from ..schemas.rl import (
+    DistributedMultiStepTDRunSpec,
     MultiStepTDValueConfig,
     MultiStepTDValueLossState,
     MultiStepTDValueMetrics,
@@ -12,6 +13,7 @@ from ..schemas.rl import (
     TDFrontierArchiveConfig,
     TDLearningRateSchedulerConfig,
     TDLipschitzPenaltyConfig,
+    TDParallelConfig,
     TDProbeEvaluationConfig,
     TDRandomWalkSamplingConfig,
     TDReplayBufferConfig,
@@ -24,6 +26,19 @@ from .config import (
     LipschitzPenaltyConfig,
     RandomWalkSamplingConfig,
     ReplayBufferConfig,
+)
+from .distributed import (
+    cpu_model_state_dict,
+    distributed_rank,
+    distributed_world_size,
+    is_distributed_initialized,
+    is_main_process,
+    load_model_state_dict,
+    local_rank_from_env,
+    split_evenly,
+    synchronized_barrier,
+    unwrap_model,
+    wrap_model_for_ddp,
 )
 from .file_tracking import TDFileMetricsTracker
 from .fitted_value_iteration import (
@@ -48,6 +63,7 @@ from .transitions import (
 
 __all__ = [
     "CompositeMultiStepTDValueTracker",
+    "DistributedMultiStepTDRunSpec",
     "FittedValueIterationConfig",
     "FittedValueIterationLossState",
     "FittedValueIterationMetrics",
@@ -70,6 +86,7 @@ __all__ = [
     "TDFrontierArchiveConfig",
     "TDLearningRateSchedulerConfig",
     "TDLipschitzPenaltyConfig",
+    "TDParallelConfig",
     "TDProbeEvaluationConfig",
     "TDRandomWalkSamplingConfig",
     "TDReplayBufferConfig",
@@ -80,7 +97,18 @@ __all__ = [
     "compute_n_step_value_target_sequence",
     "compute_n_step_value_targets",
     "compute_td_lambda_value_targets",
+    "cpu_model_state_dict",
+    "distributed_rank",
+    "distributed_world_size",
     "enumerate_neighbor_states",
     "greedy_actions_from_value",
     "greedy_rollout_from_value",
+    "is_distributed_initialized",
+    "is_main_process",
+    "load_model_state_dict",
+    "local_rank_from_env",
+    "split_evenly",
+    "synchronized_barrier",
+    "unwrap_model",
+    "wrap_model_for_ddp",
 ]

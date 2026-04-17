@@ -24,6 +24,17 @@ from pilgrim.utils.lr_scheduler_utils import (
     step_lr_scheduler,
 )
 
+from .distributed import (
+    distributed_rank,
+    distributed_world_size,
+    is_distributed_initialized,
+    is_main_process,
+    local_rank_from_env,
+    split_evenly,
+    synchronized_barrier,
+    unwrap_model,
+    wrap_model_for_ddp,
+)
 from .multistep_td_tracking import MultiStepTDValueTracker
 from .replay import FrontierArchiveUpdateStats, FrontierStateArchive, TensorReplayBuffer
 from .sampling import (
@@ -61,6 +72,50 @@ class MultiStepTDValueFrontierRefreshStats:
     replaced: int = 0
 
 
+@dataclass(slots=True)
+class MultiStepTDValuePhaseTimes:
+    """
+    Wall-clock timings for one optimizer step.
+
+    Args:
+        replay_refresh_time_s: Time spent appending replay states.
+        frontier_refresh_time_s: Time spent refreshing frontier candidates.
+        batch_sample_time_s: Time spent sampling the optimizer batch.
+        target_compute_time_s: Time spent constructing frozen TD targets.
+        model_forward_time_s: Time spent in the online-model forward pass.
+        backward_time_s: Time spent in ``loss.backward()``.
+        optimizer_time_s: Time spent in clipping, optimizer step, and scheduler.
+
+    """
+
+    replay_refresh_time_s: float = 0.0
+    frontier_refresh_time_s: float = 0.0
+    batch_sample_time_s: float = 0.0
+    target_compute_time_s: float = 0.0
+    model_forward_time_s: float = 0.0
+    backward_time_s: float = 0.0
+    optimizer_time_s: float = 0.0
+
+
+@dataclass(slots=True)
+class MultiStepTDValueOptimizerStats:
+    """
+    Gradient and optimizer-step diagnostics for one training step.
+
+    Args:
+        gradient_global_norm: Global L2 norm across all gradients.
+        gradient_max_abs: Maximum absolute gradient entry.
+        backward_time_s: Time spent in ``loss.backward()``.
+        optimizer_time_s: Time spent in clipping, optimizer step, and scheduler.
+
+    """
+
+    gradient_global_norm: float | None
+    gradient_max_abs: float | None
+    backward_time_s: float
+    optimizer_time_s: float
+
+
 class MultiStepTDValueTrainer:
     """
     Train a scalar value model with discounted multi-step TD targets.
@@ -93,18 +148,37 @@ class MultiStepTDValueTrainer:
         self._validate_config()
 
         self.device = self._resolve_device(self.config.device)
+        self.rank = distributed_rank()
+        self.world_size = distributed_world_size()
+        self.is_distributed = (
+            self.config.parallel.uses_ddp
+            and self.world_size > 1
+            and is_distributed_initialized()
+        )
         self.model = self.model.to(self.device)
-        self.target_model = copy.deepcopy(self.model).to(self.device)
+        self.target_model = copy.deepcopy(unwrap_model(self.model)).to(self.device)
         self.target_model.eval()
         self.optimizer = optimizer or self._build_optimizer()
+        if self.config.parallel.uses_ddp:
+            self.model = wrap_model_for_ddp(
+                self.model,
+                device=self.device,
+                broadcast_buffers=self.config.parallel.broadcast_buffers,
+                find_unused_parameters=self.config.parallel.find_unused_parameters,
+            )
         self.lr_scheduler = self._build_lr_scheduler()
-        self.tracker = tracker
+        self.tracker = tracker if is_main_process() else None
         self.replay = TensorReplayBuffer(capacity=int(self.config.replay.capacity))
         self.frontier_archive = self._build_frontier_archive()
         self._num_sampling_calls = 0
         self._num_frontier_sampling_calls = 0
         self._step = 0
         self._last_frontier_refresh = MultiStepTDValueFrontierRefreshStats()
+        self._sampling_generator = torch.Generator(device=self.replay.storage_device)
+        self._sampling_generator.manual_seed(
+            int(self.config.sampling.seed) + 100_000 * int(self.rank)
+        )
+        self._permutation_generator = self._build_permutation_generator()
         self.target_evaluator = build_td_target_evaluation_backend(
             target_model=self.target_model,
             graph=self.graph,
@@ -135,8 +209,10 @@ class MultiStepTDValueTrainer:
             )
             history.extend(self.train_step() for _ in range(total_updates))
         finally:
+            synchronized_barrier()
             if self.tracker is not None:
                 self.tracker.on_fit_end(self, history)
+            self.target_evaluator.close()
 
         return history
 
@@ -150,15 +226,95 @@ class MultiStepTDValueTrainer:
         """
         step_started = time.perf_counter()
         self.ensure_replay_ready()
-        self._maybe_refresh_replay()
-        frontier_refresh = self._maybe_refresh_frontier_archive()
-        batch, frontier_batch_size = self._sample_training_batch()
+        frontier_refresh, batch, frontier_batch_size, phase_times = (
+            self._refresh_and_sample_batch()
+        )
         self.model.train()
-        loss_state = self.compute_loss(batch)
-        current_learning_rate = self._current_learning_rate()
+        loss_state, target_compute_time_s, model_forward_time_s = (
+            self._compute_loss_with_timing(batch)
+        )
+        phase_times.target_compute_time_s = target_compute_time_s
+        phase_times.model_forward_time_s = model_forward_time_s
+        optimizer_stats = self._apply_optimizer_step(loss_state)
+        phase_times.backward_time_s = optimizer_stats.backward_time_s
+        phase_times.optimizer_time_s = optimizer_stats.optimizer_time_s
 
+        self._step += 1
+        target_sync_applied = False
+        if self._step % int(self.config.target_sync_interval) == 0:
+            self.sync_target_model()
+            target_sync_applied = True
+        metrics = self._build_step_metrics(loss_state)
+        if self.tracker is not None:
+            self.tracker.on_train_step_end(
+                self,
+                self._build_step_diagnostics(
+                    batch=batch,
+                    frontier_batch_size=frontier_batch_size,
+                    frontier_refresh=frontier_refresh,
+                    loss_state=loss_state,
+                    metrics=metrics,
+                    optimizer_stats=optimizer_stats,
+                    phase_times=phase_times,
+                    step_started=step_started,
+                    target_sync_applied=target_sync_applied,
+                ),
+            )
+        return metrics
+
+    def _refresh_and_sample_batch(
+        self,
+    ) -> tuple[
+        MultiStepTDValueFrontierRefreshStats,
+        torch.Tensor,
+        int,
+        MultiStepTDValuePhaseTimes,
+    ]:
+        """
+        Refresh replay/frontier state and sample the next optimizer batch.
+
+        Returns:
+            Tuple ``(frontier_refresh, batch, frontier_batch_size, phase_times)``.
+
+        """
+        phase_times = MultiStepTDValuePhaseTimes()
+        replay_refresh_started = time.perf_counter()
+        self._maybe_refresh_replay()
+        phase_times.replay_refresh_time_s = (
+            time.perf_counter() - replay_refresh_started
+        )
+
+        frontier_refresh_started = time.perf_counter()
+        frontier_refresh = self._maybe_refresh_frontier_archive()
+        phase_times.frontier_refresh_time_s = (
+            time.perf_counter() - frontier_refresh_started
+        )
+
+        batch_sample_started = time.perf_counter()
+        batch, frontier_batch_size = self._sample_training_batch()
+        phase_times.batch_sample_time_s = time.perf_counter() - batch_sample_started
+        return frontier_refresh, batch, frontier_batch_size, phase_times
+
+    def _apply_optimizer_step(
+        self,
+        loss_state: MultiStepTDValueLossState,
+    ) -> MultiStepTDValueOptimizerStats:
+        """
+        Backpropagate one loss payload and apply one optimizer update.
+
+        Args:
+            loss_state: Loss payload produced for the sampled batch.
+
+        Returns:
+            Optimizer-step diagnostics bundle.
+
+        """
         self.optimizer.zero_grad(set_to_none=True)
+        backward_started = time.perf_counter()
         loss_state.total_loss.backward()
+        backward_time_s = time.perf_counter() - backward_started
+
+        optimizer_started = time.perf_counter()
         gradient_global_norm = self._compute_gradient_global_norm()
         gradient_max_abs = self._compute_gradient_max_abs()
         if self.config.gradient_clip_norm is not None:
@@ -168,63 +324,112 @@ class MultiStepTDValueTrainer:
             )
         self.optimizer.step()
         step_lr_scheduler(self.lr_scheduler)
+        optimizer_time_s = time.perf_counter() - optimizer_started
+        return MultiStepTDValueOptimizerStats(
+            gradient_global_norm=gradient_global_norm,
+            gradient_max_abs=gradient_max_abs,
+            backward_time_s=backward_time_s,
+            optimizer_time_s=optimizer_time_s,
+        )
 
-        self._step += 1
-        target_sync_applied = False
-        if self._step % int(self.config.target_sync_interval) == 0:
-            self.sync_target_model()
-            target_sync_applied = True
+    def _build_step_metrics(
+        self,
+        loss_state: MultiStepTDValueLossState,
+    ) -> MultiStepTDValueMetrics:
+        """
+        Build the compact metrics payload returned by ``train_step``.
 
+        Args:
+            loss_state: Tensor-valued loss payload for the current batch.
+
+        Returns:
+            Step metrics summarizing the optimizer update.
+
+        """
         lipschitz_value = (
             None
             if loss_state.lipschitz_loss is None
             else float(loss_state.lipschitz_loss.detach().item())
         )
-        metrics = MultiStepTDValueMetrics(
+        return MultiStepTDValueMetrics(
             step=int(self._step),
             total_loss=float(loss_state.total_loss.detach().item()),
             td_loss=float(loss_state.td_loss.detach().item()),
             lipschitz_loss=lipschitz_value,
             replay_size=len(self.replay),
         )
+
+    def _build_step_diagnostics(
+        self,
+        *,
+        batch: torch.Tensor,
+        frontier_batch_size: int,
+        frontier_refresh: MultiStepTDValueFrontierRefreshStats,
+        loss_state: MultiStepTDValueLossState,
+        metrics: MultiStepTDValueMetrics,
+        optimizer_stats: MultiStepTDValueOptimizerStats,
+        phase_times: MultiStepTDValuePhaseTimes,
+        step_started: float,
+        target_sync_applied: bool,
+    ) -> MultiStepTDValueStepDiagnostics:
+        """
+        Build the detailed step diagnostics emitted to trackers.
+
+        Args:
+            batch: Sampled optimizer batch.
+            frontier_batch_size: Number of frontier states in ``batch``.
+            frontier_refresh: Frontier-refresh summary for the step.
+            loss_state: Tensor-valued loss payload.
+            metrics: Compact step metrics.
+            optimizer_stats: Gradient and optimizer diagnostics.
+            phase_times: Per-phase wall-clock timings.
+            step_started: ``perf_counter`` timestamp captured at step start.
+            target_sync_applied: Whether the target model was synchronized.
+
+        Returns:
+            Tracker diagnostics payload.
+
+        """
         frontier_score_mean, frontier_score_max = self._frontier_archive_score_stats()
-        if self.tracker is not None:
-            diagnostics = MultiStepTDValueStepDiagnostics(
-                step=int(self._step),
-                total_loss=float(loss_state.total_loss.detach().item()),
-                td_loss=float(loss_state.td_loss.detach().item()),
-                lipschitz_loss=lipschitz_value,
-                replay_size=len(self.replay),
-                replay_fill_ratio=self.replay.storage_usage_ratio(),
-                learning_rate=current_learning_rate,
-                step_time_s=time.perf_counter() - step_started,
-                gradient_global_norm=gradient_global_norm,
-                gradient_max_abs=gradient_max_abs,
-                target_sync_applied=target_sync_applied,
-                frontier_archive_size=0
-                if self.frontier_archive is None
-                else len(self.frontier_archive),
-                frontier_archive_fill_ratio=0.0
-                if self.frontier_archive is None
-                else self.frontier_archive.storage_usage_ratio(),
-                frontier_batch_size=int(frontier_batch_size),
-                frontier_refresh_applied=bool(frontier_refresh.refresh_applied),
-                frontier_candidate_count=int(frontier_refresh.candidate_count),
-                frontier_unique_candidate_count=int(
-                    frontier_refresh.unique_candidate_count
-                ),
-                frontier_selected_count=int(frontier_refresh.selected_count),
-                frontier_admitted=int(frontier_refresh.admitted),
-                frontier_updated=int(frontier_refresh.updated),
-                frontier_replaced=int(frontier_refresh.replaced),
-                frontier_score_mean=frontier_score_mean,
-                frontier_score_max=frontier_score_max,
-                batch_states=batch.detach().cpu(),
-                predictions=loss_state.predictions.detach().cpu(),
-                targets=loss_state.targets.detach().cpu(),
-            )
-            self.tracker.on_train_step_end(self, diagnostics)
-        return metrics
+        return MultiStepTDValueStepDiagnostics(
+            step=int(metrics.step),
+            total_loss=float(metrics.total_loss),
+            td_loss=float(metrics.td_loss),
+            lipschitz_loss=metrics.lipschitz_loss,
+            replay_size=len(self.replay),
+            replay_fill_ratio=self.replay.storage_usage_ratio(),
+            learning_rate=self._current_learning_rate(),
+            step_time_s=time.perf_counter() - step_started,
+            replay_refresh_time_s=phase_times.replay_refresh_time_s,
+            frontier_refresh_time_s=phase_times.frontier_refresh_time_s,
+            batch_sample_time_s=phase_times.batch_sample_time_s,
+            target_compute_time_s=phase_times.target_compute_time_s,
+            model_forward_time_s=phase_times.model_forward_time_s,
+            backward_time_s=phase_times.backward_time_s,
+            optimizer_time_s=phase_times.optimizer_time_s,
+            gradient_global_norm=optimizer_stats.gradient_global_norm,
+            gradient_max_abs=optimizer_stats.gradient_max_abs,
+            target_sync_applied=target_sync_applied,
+            frontier_archive_size=0
+            if self.frontier_archive is None
+            else len(self.frontier_archive),
+            frontier_archive_fill_ratio=0.0
+            if self.frontier_archive is None
+            else self.frontier_archive.storage_usage_ratio(),
+            frontier_batch_size=int(frontier_batch_size),
+            frontier_refresh_applied=bool(frontier_refresh.refresh_applied),
+            frontier_candidate_count=int(frontier_refresh.candidate_count),
+            frontier_unique_candidate_count=int(frontier_refresh.unique_candidate_count),
+            frontier_selected_count=int(frontier_refresh.selected_count),
+            frontier_admitted=int(frontier_refresh.admitted),
+            frontier_updated=int(frontier_refresh.updated),
+            frontier_replaced=int(frontier_refresh.replaced),
+            frontier_score_mean=frontier_score_mean,
+            frontier_score_max=frontier_score_max,
+            batch_states=batch.detach().cpu(),
+            predictions=loss_state.predictions.detach().cpu(),
+            targets=loss_state.targets.detach().cpu(),
+        )
 
     def compute_loss(self, states: torch.Tensor) -> MultiStepTDValueLossState:
         """
@@ -237,9 +442,30 @@ class MultiStepTDValueTrainer:
             Tensor-valued loss state for the sampled batch.
 
         """
+        loss_state, _, _ = self._compute_loss_with_timing(states)
+        return loss_state
+
+    def _compute_loss_with_timing(
+        self,
+        states: torch.Tensor,
+    ) -> tuple[MultiStepTDValueLossState, float, float]:
+        """
+        Compute one loss payload and return phase timings.
+
+        Args:
+            states: Batch of states sampled from replay memory.
+
+        Returns:
+            Tuple ``(loss_state, target_compute_time_s, model_forward_time_s)``.
+
+        """
         batch = torch.as_tensor(states, device=self.device).long()
+        target_started = time.perf_counter()
         targets = self._compute_targets(batch)
+        target_compute_time_s = time.perf_counter() - target_started
+        forward_started = time.perf_counter()
         predictions = self.model(batch).reshape(-1).float()
+        model_forward_time_s = time.perf_counter() - forward_started
         td_loss = torch.nn.functional.mse_loss(predictions, targets.float())
 
         total_loss = td_loss
@@ -258,12 +484,16 @@ class MultiStepTDValueTrainer:
             ).float()
             total_loss += float(self.config.lipschitz.weight) * lipschitz_loss
 
-        return MultiStepTDValueLossState(
-            total_loss=total_loss,
-            td_loss=td_loss,
-            lipschitz_loss=lipschitz_loss,
-            predictions=predictions,
-            targets=targets,
+        return (
+            MultiStepTDValueLossState(
+                total_loss=total_loss,
+                td_loss=td_loss,
+                lipschitz_loss=lipschitz_loss,
+                predictions=predictions,
+                targets=targets,
+            ),
+            target_compute_time_s,
+            model_forward_time_s,
         )
 
     def ensure_replay_ready(self) -> None:
@@ -312,7 +542,7 @@ class MultiStepTDValueTrainer:
 
     def sync_target_model(self) -> None:
         """Synchronize the frozen target model with the online model."""
-        self.target_model.load_state_dict(self.model.state_dict())
+        self.target_model.load_state_dict(unwrap_model(self.model).state_dict())
         self.target_model.eval()
         self.target_evaluator.sync_target_model(self.target_model)
 
@@ -444,7 +674,7 @@ class MultiStepTDValueTrainer:
             RuntimeError: If both replay sources are unexpectedly empty.
 
         """
-        total_batch_size = int(self.config.replay.batch_size)
+        total_batch_size = self._local_batch_size()
         frontier_batch_size = 0
         batch_parts: list[torch.Tensor] = []
 
@@ -454,13 +684,14 @@ class MultiStepTDValueTrainer:
             and len(self.frontier_archive) > 0
         ):
             frontier_batch_size = min(
-                int(self.config.frontier.batch_size),
+                self._local_frontier_batch_size(),
                 total_batch_size,
                 len(self.frontier_archive),
             )
             batch_parts.append(
                 self.frontier_archive.sample(
                     frontier_batch_size,
+                    generator=self._sampling_generator,
                     device=self.device,
                 )
             )
@@ -470,6 +701,7 @@ class MultiStepTDValueTrainer:
             batch_parts.append(
                 self.replay.sample(
                     main_batch_size,
+                    generator=self._sampling_generator,
                     device=self.device,
                 )
             )
@@ -481,8 +713,59 @@ class MultiStepTDValueTrainer:
             return batch_parts[0], frontier_batch_size
 
         batch = torch.cat(batch_parts, dim=0)
-        permutation = torch.randperm(batch.shape[0], device=batch.device)
+        permutation = torch.randperm(
+            batch.shape[0],
+            generator=self._permutation_generator,
+            device=batch.device,
+        )
         return batch[permutation], frontier_batch_size
+
+    def _local_batch_size(self) -> int:
+        """
+        Return the optimizer batch size owned by the active rank.
+
+        Returns:
+            Rank-local optimizer batch size.
+
+        """
+        if not self.is_distributed:
+            return int(self.config.replay.batch_size)
+        return split_evenly(
+            int(self.config.replay.batch_size),
+            int(self.world_size),
+            int(self.rank),
+        )
+
+    def _local_frontier_batch_size(self) -> int:
+        """
+        Return the frontier archive batch size owned by the active rank.
+
+        Returns:
+            Rank-local frontier batch size.
+
+        """
+        if not self.is_distributed:
+            return int(self.config.frontier.batch_size)
+        return split_evenly(
+            int(self.config.frontier.batch_size),
+            int(self.world_size),
+            int(self.rank),
+        )
+
+    def _build_permutation_generator(self) -> torch.Generator:
+        """
+        Build a rank-aware generator used for local batch shuffling.
+
+        Returns:
+            Torch generator located on the training device when possible.
+
+        """
+        generator_device = (
+            self.device if self.device.type == "cuda" else torch.device("cpu")
+        )
+        generator = torch.Generator(device=generator_device)
+        generator.manual_seed(int(self.config.sampling.seed) + 200_000 * int(self.rank))
+        return generator
 
     def _maybe_refresh_frontier_archive(self) -> MultiStepTDValueFrontierRefreshStats:
         """
@@ -678,6 +961,16 @@ class MultiStepTDValueTrainer:
             Resolved torch device.
 
         """
+        if self.config.parallel.uses_ddp:
+            local_rank = int(local_rank_from_env())
+            if str(device).lower() == "auto":
+                if self.graph_device.type == "cuda":
+                    return self.graph_device
+                return torch.device(f"cuda:{local_rank}")
+            requested = torch.device(device)
+            if requested.type == "cuda":
+                return torch.device(f"cuda:{local_rank}")
+            return requested
         if str(device).lower() == "auto":
             return self.graph_device
         return torch.device(device)
@@ -783,30 +1076,46 @@ class MultiStepTDValueTrainer:
 
     def _validate_parallel_config(self) -> None:
         """
-        Validate secondary-GPU evaluation runtime requirements.
+        Validate GPU-parallel runtime requirements.
 
         Raises:
-            ValueError: If multi-GPU evaluation is configured incompatibly.
+            ValueError: If multi-GPU learner parallelism is configured
+                incompatibly.
 
         """
-        if not self.config.parallel.uses_secondary_gpus:
+        if not self.config.parallel.uses_ddp:
             return
         resolved_device = self._resolve_device(self.config.device)
         if resolved_device.type != "cuda":
             raise ValueError(
-                "parallel secondary-GPU evaluation requires a CUDA learner device."
+                "parallel DDP learner mode requires a CUDA device."
             )
-        if resolved_device.index not in {None, 0}:
+        if resolved_device.index is None:
             raise ValueError(
-                "parallel secondary-GPU evaluation expects the learner on cuda:0. "
-                "Use CUDA_VISIBLE_DEVICES to remap devices if needed."
+                "parallel DDP learner mode requires a concrete CUDA device index."
             )
         if not torch.cuda.is_available():
             raise ValueError(
-                "parallel secondary-GPU evaluation requires CUDA availability."
+                "parallel DDP learner mode requires CUDA availability."
             )
         if int(self.config.parallel.num_gpus) > int(torch.cuda.device_count()):
             raise ValueError(
                 f"parallel.num_gpus={int(self.config.parallel.num_gpus)} exceeds "
                 f"available CUDA devices ({int(torch.cuda.device_count())})."
+            )
+        if (
+            int(self.config.parallel.world_size) > 1
+            and not is_distributed_initialized()
+        ):
+            raise ValueError(
+                "parallel DDP learner mode requires torch.distributed to be "
+                "initialized. Launch through torchrun or the distributed "
+                "entrypoint."
+            )
+        if (
+            is_distributed_initialized()
+            and int(distributed_world_size()) != int(self.config.parallel.world_size)
+        ):
+            raise ValueError(
+                "distributed world size does not match parallel.num_gpus."
             )

@@ -14,6 +14,7 @@ import torch
 from cayleypy import CayleyGraph, Predictor
 from sklearn.model_selection import train_test_split
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel
 from tqdm.auto import tqdm
 
 from .benchmarks import small_inference_speed_benchmark
@@ -691,7 +692,8 @@ class _ModelCheckpoints:
     @staticmethod
     def _cpu_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
         """Return a dictionary of the model's state_dict, cloned and detached on CPU."""
-        return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        source = model.module if isinstance(model, DistributedDataParallel) else model
+        return {k: v.detach().cpu().clone() for k, v in source.state_dict().items()}
 
     def update(
         self, model: nn.Module, *, val_loss: float, center_eval: float, lip_eval: float

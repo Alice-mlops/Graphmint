@@ -44,6 +44,13 @@ _CSV_FIELD_ORDER = (
     "replay_fill_ratio",
     "learning_rate",
     "step_time_s",
+    "replay_refresh_time_s",
+    "frontier_refresh_time_s",
+    "batch_sample_time_s",
+    "target_compute_time_s",
+    "model_forward_time_s",
+    "backward_time_s",
+    "optimizer_time_s",
     "batch_size",
     "batch_center_fraction",
     "batch_unique_ratio",
@@ -286,6 +293,13 @@ class TDFileMetricsTracker:
             "replay_fill_ratio": float(diagnostics.replay_fill_ratio),
             "learning_rate": float(diagnostics.learning_rate),
             "step_time_s": float(diagnostics.step_time_s),
+            "replay_refresh_time_s": float(diagnostics.replay_refresh_time_s),
+            "frontier_refresh_time_s": float(diagnostics.frontier_refresh_time_s),
+            "batch_sample_time_s": float(diagnostics.batch_sample_time_s),
+            "target_compute_time_s": float(diagnostics.target_compute_time_s),
+            "model_forward_time_s": float(diagnostics.model_forward_time_s),
+            "backward_time_s": float(diagnostics.backward_time_s),
+            "optimizer_time_s": float(diagnostics.optimizer_time_s),
             "batch_size": float(diagnostics.batch_states.shape[0]),
             "batch_center_fraction": center_fraction(
                 diagnostics.batch_states,
@@ -356,6 +370,8 @@ class TDFileMetricsTracker:
             f"replay={int(metrics['replay_size'])}",
             f"center={metrics.get('center_pred', float('nan')):.4f}",
             f"t={metrics['step_time_s']:.2f}s",
+            f"target={metrics.get('target_compute_time_s', float('nan')):.2f}s",
+            f"backward={metrics.get('backward_time_s', float('nan')):.2f}s",
         ]
         if "probe/success_rate" in metrics:
             parts.append(f"probe={metrics['probe/success_rate']:.3f}")
