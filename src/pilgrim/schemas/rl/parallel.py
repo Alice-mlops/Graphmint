@@ -19,6 +19,9 @@ class TDParallelConfig(BaseModel):
         backend: Distributed backend used by ``torch.distributed``.
         broadcast_buffers: Whether DDP should broadcast buffers from rank zero.
         find_unused_parameters: Whether DDP should search for unused params.
+            Defaults to ``True`` because some existing model variants allocate
+            optional transition-normalization parameters that are not always
+            part of the TD-loss graph on every step.
 
     """
 
@@ -28,7 +31,7 @@ class TDParallelConfig(BaseModel):
     num_gpus: int = Field(1, ge=1)
     backend: Literal["nccl", "gloo"] = "nccl"
     broadcast_buffers: bool = False
-    find_unused_parameters: bool = False
+    find_unused_parameters: bool = True
 
     @property
     def resolved_mode(self) -> Literal["single", "ddp"]:
