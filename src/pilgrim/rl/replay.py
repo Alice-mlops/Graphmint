@@ -241,6 +241,23 @@ class FrontierArchiveUpdateStats:
     skipped: int
 
 
+@dataclass(slots=True, frozen=True)
+class FrontierArchiveSnapshot:
+    """
+    Exact archive contents used to synchronize ranks.
+
+    Args:
+        states: Archived state rows with shape ``(size, state_size)``.
+        hashes: CPU hash tensor aligned with ``states``.
+        scores: Floating-point score tensor aligned with ``states``.
+
+    """
+
+    states: torch.Tensor
+    hashes: torch.Tensor
+    scores: torch.Tensor
+
+
 class FrontierStateArchive:
     """
     Tiny deduplicated archive for rare high-value frontier states.
@@ -439,6 +456,80 @@ class FrontierStateArchive:
         if device is not None:
             return batch.to(device)
         return batch
+
+    def snapshot(self) -> FrontierArchiveSnapshot:
+        """
+        Return an exact snapshot of the current archive contents.
+
+        Returns:
+            Immutable archive snapshot suitable for cross-rank synchronization.
+
+        """
+        if self._size == 0:
+            if self._storage is None:
+                states = torch.empty((0, 0), dtype=torch.long, device=self.storage_device)
+            else:
+                states = self._storage[:0].clone()
+            return FrontierArchiveSnapshot(
+                states=states,
+                hashes=self._hashes[:0].clone(),
+                scores=self._scores[:0].clone(),
+            )
+
+        assert self._storage is not None
+        return FrontierArchiveSnapshot(
+            states=self._storage[: self._size].clone(),
+            hashes=self._hashes[: self._size].clone(),
+            scores=self._scores[: self._size].clone(),
+        )
+
+    def load_snapshot(self, snapshot: FrontierArchiveSnapshot) -> None:
+        """
+        Replace the archive contents with a synchronized snapshot.
+
+        Args:
+            snapshot: Exact archive state materialized on another rank.
+
+        Raises:
+            ValueError: If the snapshot tensors are inconsistent.
+
+        """
+        states = torch.as_tensor(snapshot.states, device=self.storage_device).long()
+        hashes = torch.as_tensor(snapshot.hashes, device="cpu", dtype=torch.int64).reshape(
+            -1
+        )
+        scores = torch.as_tensor(
+            snapshot.scores,
+            device=self.storage_device,
+            dtype=torch.float32,
+        ).reshape(-1)
+        if states.ndim != _EXPECTED_STATE_NDIM:
+            raise ValueError(
+                "snapshot.states must have shape (batch, state_size), "
+                f"got {tuple(states.shape)}."
+            )
+        if states.shape[0] != hashes.shape[0] or states.shape[0] != scores.shape[0]:
+            raise ValueError(
+                "snapshot states, hashes, and scores must contain the same number of rows."
+            )
+        if states.shape[0] > self.capacity:
+            raise ValueError("snapshot size cannot exceed archive capacity.")
+
+        if states.shape[0] > 0:
+            if self._storage is None or tuple(self._storage.shape[1:]) != tuple(
+                states.shape[1:]
+            ):
+                self._allocate_storage(states)
+            assert self._storage is not None
+            self._storage[: states.shape[0]] = states
+        self._size = int(states.shape[0])
+        self._hash_to_index.clear()
+        if self._size == 0:
+            return
+        self._hashes[: self._size] = hashes
+        self._scores[: self._size] = scores
+        for index, hash_value in enumerate(hashes.tolist()):
+            self._hash_to_index[int(hash_value)] = int(index)
 
     def storage_usage_ratio(self) -> float:
         """

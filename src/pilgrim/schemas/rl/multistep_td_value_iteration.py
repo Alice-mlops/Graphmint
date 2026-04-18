@@ -188,6 +188,8 @@ class TDFrontierArchiveConfig(BaseModel):
             considered for archive admission per refresh.
         score_ema_decay: Exponential moving-average decay used when a state is
             rediscovered and its archive score is updated.
+        distributed_scoring: Whether DDP ranks should coordinate frontier
+            candidate scoring and archive synchronization.
 
     """
 
@@ -203,6 +205,7 @@ class TDFrontierArchiveConfig(BaseModel):
     suffix_fraction: float = Field(0.5, gt=0.0, le=1.0)
     admissions_per_refresh: int = Field(64, ge=1)
     score_ema_decay: float = Field(0.9, ge=0.0, le=1.0)
+    distributed_scoring: bool = True
 
 
 class MultiStepTDValueConfig(BaseModel):
@@ -374,6 +377,9 @@ class MultiStepTDValueConfig(BaseModel):
                 self.frontier.admissions_per_refresh
             ),
             "frontier.score_ema_decay": float(self.frontier.score_ema_decay),
+            "frontier.distributed_scoring": bool(
+                self.frontier.distributed_scoring
+            ),
             "lipschitz.weight": float(self.lipschitz.weight),
             "lipschitz.max_states": self.lipschitz.max_states,
             "lipschitz.generator_indices": None

@@ -156,6 +156,98 @@ def synchronized_barrier() -> None:
         dist.barrier()
 
 
+def all_reduce_sum_in_place(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Sum a tensor across all ranks in place.
+
+    Args:
+        tensor: Tensor reduced with a distributed sum.
+
+    Returns:
+        The same tensor after in-place reduction, or the input unchanged when
+        distributed training is disabled.
+
+    """
+    if is_distributed_initialized() and distributed_world_size() > 1:
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    return tensor
+
+
+def broadcast_tensor_from_main(
+    tensor: torch.Tensor | None,
+    *,
+    device: torch.device,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """
+    Broadcast a tensor from rank zero to all ranks.
+
+    Args:
+        tensor: Source tensor on rank zero, or ``None`` on other ranks.
+        device: Device used for distributed collectives.
+        dtype: Tensor dtype used on nonzero ranks when ``tensor`` is ``None``.
+
+    Returns:
+        Broadcast tensor materialized on ``device``.
+
+    Raises:
+        ValueError: If nonzero ranks do not provide ``dtype``.
+
+    """
+    if not is_distributed_initialized() or distributed_world_size() <= 1:
+        if tensor is None:
+            raise ValueError("tensor must be provided when distributed is disabled.")
+        return torch.as_tensor(tensor, device=device)
+
+    rank = distributed_rank()
+    if rank == 0:
+        payload = torch.as_tensor(tensor, device=device)
+        shape = torch.tensor(payload.shape, device=device, dtype=torch.int64)
+        ndim = torch.tensor([payload.ndim], device=device, dtype=torch.int64)
+    else:
+        if dtype is None:
+            raise ValueError("dtype must be provided on nonzero ranks.")
+        payload = None
+        ndim = torch.empty((1,), device=device, dtype=torch.int64)
+        shape = None
+
+    dist.broadcast(ndim, src=0)
+    ndim_value = int(ndim.item())
+    if rank != 0:
+        shape = torch.empty((ndim_value,), device=device, dtype=torch.int64)
+    assert shape is not None
+    if ndim_value > 0:
+        dist.broadcast(shape, src=0)
+
+    if rank != 0:
+        broadcast_shape = tuple(int(value) for value in shape.tolist())
+        payload = torch.empty(broadcast_shape, device=device, dtype=dtype)
+    assert payload is not None
+    if payload.numel() > 0:
+        dist.broadcast(payload, src=0)
+    return payload
+
+
+def split_range(total: int, parts: int, index: int) -> tuple[int, int]:
+    """
+    Return the half-open interval owned by one shard.
+
+    Args:
+        total: Total number of items to partition.
+        parts: Number of partitions.
+        index: Zero-based shard index.
+
+    Returns:
+        Tuple ``(start, end)`` describing the owned interval.
+
+    """
+    shard_size = split_evenly(total, parts, index)
+    base = int(total) // int(parts)
+    remainder = int(total) % int(parts)
+    start = int(index) * base + min(int(index), remainder)
+    return start, start + shard_size
+
+
 def split_evenly(total: int, parts: int, index: int) -> int:
     """
     Return the even split size for one shard index.

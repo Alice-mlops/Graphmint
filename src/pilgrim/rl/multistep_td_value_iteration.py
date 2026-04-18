@@ -25,18 +25,26 @@ from pilgrim.utils.lr_scheduler_utils import (
 )
 
 from .distributed import (
+    all_reduce_sum_in_place,
+    broadcast_tensor_from_main,
     distributed_rank,
     distributed_world_size,
     is_distributed_initialized,
     is_main_process,
     local_rank_from_env,
     split_evenly,
+    split_range,
     synchronized_barrier,
     unwrap_model,
     wrap_model_for_ddp,
 )
 from .multistep_td_tracking import MultiStepTDValueTracker
-from .replay import FrontierArchiveUpdateStats, FrontierStateArchive, TensorReplayBuffer
+from .replay import (
+    FrontierArchiveSnapshot,
+    FrontierArchiveUpdateStats,
+    FrontierStateArchive,
+    TensorReplayBuffer,
+)
 from .sampling import (
     sample_states_from_random_walks,
     sample_suffix_states_from_random_walks,
@@ -777,57 +785,323 @@ class MultiStepTDValueTrainer:
         """
         stats = MultiStepTDValueFrontierRefreshStats()
         if self._frontier_refresh_is_due():
-            frontier_mode = self._resolve_frontier_candidate_mode()
-            frontier_width = self._resolve_frontier_candidate_width()
-            frontier_length = self._resolve_frontier_candidate_length()
-            frontier_history_depth = self._resolve_frontier_candidate_history_depth(
-                candidate_mode=frontier_mode,
-                candidate_length=frontier_length,
-            )
-            candidate_states, _ = sample_suffix_states_from_random_walks(
-                self.graph,
-                rw_mode=frontier_mode,
-                rw_width=frontier_width,
-                rw_length=frontier_length,
-                suffix_fraction=float(self.config.frontier.suffix_fraction),
-                base_seed=int(self.config.sampling.seed) + 1_000_003,
-                sample_index=self._num_frontier_sampling_calls,
-                nbt_history_depth=frontier_history_depth,
-            )
-            self._num_frontier_sampling_calls += 1
-            stats.refresh_applied = True
-            stats.candidate_count = int(candidate_states.shape[0])
-            if candidate_states.shape[0] > 0:
-                unique_candidates, unique_hashes = self.graph.get_unique_states(
-                    self.graph.encode_states(candidate_states)
-                )
-                unique_states = self.graph.decode_states(unique_candidates)
-                stats.unique_candidate_count = int(unique_states.shape[0])
-                if unique_states.shape[0] > 0:
-                    candidate_scores = self._compute_targets(unique_states)
-                    stats.selected_count = min(
-                        int(self.config.frontier.admissions_per_refresh),
-                        int(candidate_scores.shape[0]),
-                    )
-                    if stats.selected_count > 0:
-                        selected_indices = torch.topk(
-                            candidate_scores,
-                            k=int(stats.selected_count),
-                            sorted=True,
-                        ).indices
-                        assert self.frontier_archive is not None
-                        update_stats = self.frontier_archive.add_candidates(
-                            unique_states[selected_indices],
-                            unique_hashes[selected_indices],
-                            candidate_scores[selected_indices],
-                            score_ema_decay=float(self.config.frontier.score_ema_decay),
-                        )
-                        stats = self._apply_frontier_update_stats(
-                            stats=stats,
-                            update_stats=update_stats,
-                        )
+            if self._distributed_frontier_scoring_enabled():
+                stats = self._refresh_frontier_archive_distributed()
+            else:
+                stats = self._refresh_frontier_archive_local()
         self._last_frontier_refresh = stats
         return stats
+
+    def _refresh_frontier_archive_local(self) -> MultiStepTDValueFrontierRefreshStats:
+        """
+        Refresh the frontier archive on the local rank only.
+
+        Returns:
+            Refresh summary for the local frontier update.
+
+        """
+        sample_index = self._num_frontier_sampling_calls
+        self._num_frontier_sampling_calls += 1
+        unique_states, unique_hashes, stats = self._sample_unique_frontier_candidates(
+            sample_index=sample_index
+        )
+        if unique_states.shape[0] > 0:
+            candidate_scores = self._compute_targets(unique_states)
+            stats.selected_count = min(
+                int(self.config.frontier.admissions_per_refresh),
+                int(candidate_scores.shape[0]),
+            )
+            if stats.selected_count > 0:
+                selected_indices = torch.topk(
+                    candidate_scores,
+                    k=int(stats.selected_count),
+                    sorted=True,
+                ).indices
+                assert self.frontier_archive is not None
+                update_stats = self.frontier_archive.add_candidates(
+                    unique_states[selected_indices],
+                    unique_hashes[selected_indices],
+                    candidate_scores[selected_indices],
+                    score_ema_decay=float(self.config.frontier.score_ema_decay),
+                )
+                stats = self._apply_frontier_update_stats(
+                    stats=stats,
+                    update_stats=update_stats,
+                )
+        return stats
+
+    def _refresh_frontier_archive_distributed(
+        self,
+    ) -> MultiStepTDValueFrontierRefreshStats:
+        """
+        Refresh the frontier archive with rank-zero candidate generation.
+
+        Rank zero samples and deduplicates candidates, all ranks score a disjoint
+        shard of those unique states, and the updated archive snapshot is then
+        synchronized back to every rank before the next optimizer batch is
+        sampled.
+
+        Returns:
+            Refresh summary broadcast from rank zero.
+
+        """
+        sample_index = self._num_frontier_sampling_calls
+        self._num_frontier_sampling_calls += 1
+        if is_main_process():
+            unique_states, unique_hashes, stats = self._sample_unique_frontier_candidates(
+                sample_index=sample_index
+            )
+        else:
+            unique_states = None
+            unique_hashes = None
+            stats = MultiStepTDValueFrontierRefreshStats(refresh_applied=True)
+
+        unique_states = broadcast_tensor_from_main(
+            unique_states,
+            device=self.device,
+            dtype=torch.long,
+        ).long()
+        stats.unique_candidate_count = int(unique_states.shape[0])
+
+        if unique_states.shape[0] > 0:
+            candidate_scores = self._compute_distributed_frontier_candidate_scores(
+                unique_states
+            )
+            if is_main_process():
+                stats.selected_count = min(
+                    int(self.config.frontier.admissions_per_refresh),
+                    int(candidate_scores.shape[0]),
+                )
+                if stats.selected_count > 0:
+                    selected_indices = torch.topk(
+                        candidate_scores,
+                        k=int(stats.selected_count),
+                        sorted=True,
+                    ).indices
+                    assert self.frontier_archive is not None
+                    assert unique_hashes is not None
+                    update_stats = self.frontier_archive.add_candidates(
+                        unique_states[selected_indices],
+                        unique_hashes[selected_indices],
+                        candidate_scores[selected_indices],
+                        score_ema_decay=float(self.config.frontier.score_ema_decay),
+                    )
+                    stats = self._apply_frontier_update_stats(
+                        stats=stats,
+                        update_stats=update_stats,
+                    )
+                    if (
+                        stats.admitted > 0
+                        or stats.updated > 0
+                        or stats.replaced > 0
+                    ):
+                        assert self.frontier_archive is not None
+                        self._sync_frontier_archive_snapshot(
+                            self.frontier_archive.snapshot()
+                        )
+                    else:
+                        self._sync_frontier_archive_snapshot(None)
+                else:
+                    self._sync_frontier_archive_snapshot(None)
+            else:
+                self._sync_frontier_archive_snapshot(None)
+        else:
+            self._sync_frontier_archive_snapshot(None)
+
+        return self._broadcast_frontier_refresh_stats(stats)
+
+    def _sample_unique_frontier_candidates(
+        self,
+        *,
+        sample_index: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, MultiStepTDValueFrontierRefreshStats]:
+        """
+        Sample and deduplicate frontier candidates for one refresh pass.
+
+        Args:
+            sample_index: Frontier sampling counter used for deterministic walks.
+
+        Returns:
+            Tuple ``(unique_states, unique_hashes, stats)`` for one refresh.
+
+        """
+        frontier_mode = self._resolve_frontier_candidate_mode()
+        frontier_width = self._resolve_frontier_candidate_width()
+        frontier_length = self._resolve_frontier_candidate_length()
+        frontier_history_depth = self._resolve_frontier_candidate_history_depth(
+            candidate_mode=frontier_mode,
+            candidate_length=frontier_length,
+        )
+        stats = MultiStepTDValueFrontierRefreshStats(refresh_applied=True)
+        candidate_states, _ = sample_suffix_states_from_random_walks(
+            self.graph,
+            rw_mode=frontier_mode,
+            rw_width=frontier_width,
+            rw_length=frontier_length,
+            suffix_fraction=float(self.config.frontier.suffix_fraction),
+            base_seed=int(self.config.sampling.seed) + 1_000_003,
+            sample_index=int(sample_index),
+            nbt_history_depth=frontier_history_depth,
+        )
+        stats.candidate_count = int(candidate_states.shape[0])
+        if candidate_states.shape[0] == 0:
+            return (
+                candidate_states.reshape(0, candidate_states.shape[-1]).long(),
+                torch.empty((0,), dtype=torch.int64, device=self.device),
+                stats,
+            )
+
+        unique_candidates, unique_hashes = self.graph.get_unique_states(
+            self.graph.encode_states(candidate_states)
+        )
+        unique_states = self.graph.decode_states(unique_candidates)
+        stats.unique_candidate_count = int(unique_states.shape[0])
+        return unique_states, unique_hashes, stats
+
+    def _compute_distributed_frontier_candidate_scores(
+        self,
+        unique_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Score unique frontier candidates by sharding them across DDP ranks.
+
+        Args:
+            unique_states: Deduplicated frontier candidates broadcast to all ranks.
+
+        Returns:
+            One-dimensional score tensor aligned with ``unique_states``.
+
+        """
+        if not self.is_distributed:
+            return self._compute_targets(unique_states)
+
+        total_states = int(unique_states.shape[0])
+        local_start, local_end = split_range(
+            total_states,
+            int(self.world_size),
+            int(self.rank),
+        )
+        gathered_scores = torch.zeros(
+            (total_states,),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        if local_end > local_start:
+            local_scores = self._compute_targets(unique_states[local_start:local_end])
+            gathered_scores[local_start:local_end] = local_scores.float()
+        return all_reduce_sum_in_place(gathered_scores)
+
+    def _sync_frontier_archive_snapshot(
+        self,
+        snapshot: FrontierArchiveSnapshot | None,
+    ) -> None:
+        """
+        Broadcast an updated frontier archive snapshot from rank zero.
+
+        Args:
+            snapshot: Exact archive contents on rank zero, or ``None`` when the
+                archive did not change during this refresh.
+
+        """
+        if self.frontier_archive is None or not self.is_distributed:
+            return
+
+        sync_flag = (
+            torch.tensor([1], device=self.device, dtype=torch.int64)
+            if snapshot is not None and is_main_process()
+            else torch.tensor([0], device=self.device, dtype=torch.int64)
+            if is_main_process()
+            else None
+        )
+        sync_flag = broadcast_tensor_from_main(
+            sync_flag,
+            device=self.device,
+            dtype=torch.int64,
+        )
+        if int(sync_flag.item()) == 0:
+            return
+
+        states = broadcast_tensor_from_main(
+            None if snapshot is None else snapshot.states,
+            device=self.device,
+            dtype=torch.long,
+        ).cpu()
+        hashes = broadcast_tensor_from_main(
+            None if snapshot is None else snapshot.hashes,
+            device=self.device,
+            dtype=torch.int64,
+        ).cpu()
+        scores = broadcast_tensor_from_main(
+            None if snapshot is None else snapshot.scores,
+            device=self.device,
+            dtype=torch.float32,
+        ).cpu()
+        self.frontier_archive.load_snapshot(
+            FrontierArchiveSnapshot(
+                states=states,
+                hashes=hashes,
+                scores=scores,
+            )
+        )
+
+    def _broadcast_frontier_refresh_stats(
+        self,
+        stats: MultiStepTDValueFrontierRefreshStats,
+    ) -> MultiStepTDValueFrontierRefreshStats:
+        """
+        Broadcast frontier-refresh summary counts from rank zero.
+
+        Args:
+            stats: Local refresh summary on rank zero.
+
+        Returns:
+            Rank-synchronized refresh summary.
+
+        """
+        if not self.is_distributed:
+            return stats
+
+        payload = (
+            torch.tensor(
+                [
+                    int(stats.refresh_applied),
+                    int(stats.candidate_count),
+                    int(stats.unique_candidate_count),
+                    int(stats.selected_count),
+                    int(stats.admitted),
+                    int(stats.updated),
+                    int(stats.replaced),
+                ],
+                device=self.device,
+                dtype=torch.int64,
+            )
+            if is_main_process()
+            else None
+        )
+        payload = broadcast_tensor_from_main(
+            payload,
+            device=self.device,
+            dtype=torch.int64,
+        )
+        return MultiStepTDValueFrontierRefreshStats(
+            refresh_applied=bool(int(payload[0].item())),
+            candidate_count=int(payload[1].item()),
+            unique_candidate_count=int(payload[2].item()),
+            selected_count=int(payload[3].item()),
+            admitted=int(payload[4].item()),
+            updated=int(payload[5].item()),
+            replaced=int(payload[6].item()),
+        )
+
+    def _distributed_frontier_scoring_enabled(self) -> bool:
+        """
+        Return whether frontier scoring should be coordinated across ranks.
+
+        Returns:
+            ``True`` when DDP is active and frontier distributed scoring is on.
+
+        """
+        return self.is_distributed and bool(self.config.frontier.distributed_scoring)
 
     def _maybe_refresh_replay(self) -> None:
         """Append fresh replay states when the configured stride is reached."""
