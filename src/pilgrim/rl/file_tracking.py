@@ -62,6 +62,13 @@ _CSV_FIELD_ORDER = (
     "value/residual_abs_max",
     "center_pred",
     "frontier_archive_size",
+    "frontier_refresh_applied",
+    "frontier_candidate_count",
+    "frontier_unique_candidate_count",
+    "frontier_selected_count",
+    "frontier_admitted",
+    "frontier_updated",
+    "frontier_replaced",
     "frontier_score_mean",
     "frontier_score_max",
     "probe/success_rate",
@@ -311,6 +318,21 @@ class TDFileMetricsTracker:
             "frontier_archive_size": float(
                 getattr(diagnostics, "frontier_archive_size", 0)
             ),
+            "frontier_refresh_applied": float(
+                int(getattr(diagnostics, "frontier_refresh_applied", False))
+            ),
+            "frontier_candidate_count": float(
+                getattr(diagnostics, "frontier_candidate_count", 0)
+            ),
+            "frontier_unique_candidate_count": float(
+                getattr(diagnostics, "frontier_unique_candidate_count", 0)
+            ),
+            "frontier_selected_count": float(
+                getattr(diagnostics, "frontier_selected_count", 0)
+            ),
+            "frontier_admitted": float(getattr(diagnostics, "frontier_admitted", 0)),
+            "frontier_updated": float(getattr(diagnostics, "frontier_updated", 0)),
+            "frontier_replaced": float(getattr(diagnostics, "frontier_replaced", 0)),
             "frontier_score_mean": float(
                 getattr(diagnostics, "frontier_score_mean", 0.0) or 0.0
             ),
