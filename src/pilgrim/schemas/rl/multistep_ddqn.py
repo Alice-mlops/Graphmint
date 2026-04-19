@@ -1,216 +1,45 @@
-# Defines pydantic schemas for discounted multi-step value learning.
-"""Schema models for multi-step TD value-iteration training."""
+# Defines pydantic schemas for discounted multi-step Double-DQN training.
+"""Schema models for multi-step Double-DQN training."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .multistep_td_value_iteration import (
+    TDFrontierArchiveConfig,
+    TDLearningRateSchedulerConfig,
+    TDLipschitzPenaltyConfig,
+    TDRandomWalkSamplingConfig,
+    TDReplayBufferConfig,
+)
 from .parallel import TDParallelConfig
 
 
-class TDReplayBufferConfig(BaseModel):
+class TDBehaviorPolicyConfig(BaseModel):
     """
-    Replay-buffer settings for multi-step TD value learning.
+    Behavior-policy settings used to sample DDQN transitions.
 
     Args:
-        capacity: Maximum number of states kept in replay memory.
-        batch_size: Number of states sampled for one optimization step.
-        min_size: Minimum replay size required before training.
-        warmstart_size: Number of states collected before the first update.
-        refresh_size: Number of fresh states appended during replay refresh.
-        refresh_stride: Number of optimizer steps between replay refresh.
+        mode: Action-sampling mode. ``"uniform"`` ignores the current policy and
+            samples allowed actions uniformly. ``"epsilon_greedy"`` follows the
+            online model greedily with random exploration.
+        epsilon: Exploration probability used when ``mode`` is
+            ``"epsilon_greedy"``.
 
     """
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    capacity: int = Field(200_000, ge=1)
-    batch_size: int = Field(512, ge=1)
-    min_size: int = Field(4_096, ge=1)
-    warmstart_size: int = Field(16_384, ge=1)
-    refresh_size: int = Field(2_048, ge=0)
-    refresh_stride: int = Field(1, ge=0)
+    mode: Literal["uniform", "epsilon_greedy"] = "uniform"
+    epsilon: float = Field(1.0, ge=0.0, le=1.0)
 
 
-class TDRandomWalkSamplingConfig(BaseModel):
+class MultiStepDDQNConfig(BaseModel):
     """
-    Random-walk replay sampling settings for multi-step TD value learning.
-
-    Args:
-        rw_mode: Random-walk mode passed to ``graph.random_walks``.
-        rw_width: Base random-walk width used during sampling.
-        rw_length: Base random-walk length used by the default schedule.
-        rw_lengths: Optional explicit schedule of ``(factor, length)`` pairs.
-        seed: Base random seed used for replay sampling.
-
-    """
-
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-    rw_mode: str = "nbt"
-    rw_width: int = Field(256, ge=1)
-    rw_length: int = Field(24, ge=1)
-    rw_lengths: tuple[tuple[float, int], ...] | None = None
-    seed: int = 42
-
-
-class TDLipschitzPenaltyConfig(BaseModel):
-    """
-    Optional Lipschitz-regularization settings for TD training.
-
-    Args:
-        weight: Multiplier applied to the Lipschitz penalty.
-        max_states: Optional cap on states passed to the penalty.
-        generator_indices: Optional generator subset used by the penalty.
-        max_generators: Optional cap on sampled generators.
-        seed: Optional random seed used by the penalty implementation.
-        state_batch_size: Optional internal chunk size for the penalty.
-        reduction: Reduction mode passed to the penalty helper.
-
-    """
-
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-    weight: float = Field(0.0, ge=0.0)
-    max_states: int | None = Field(default=None, ge=1)
-    generator_indices: tuple[int, ...] | None = None
-    max_generators: int | None = Field(default=None, ge=1)
-    seed: int | None = None
-    state_batch_size: int | None = Field(default=None, ge=1)
-    reduction: str = "mean"
-
-
-class TDLearningRateSchedulerConfig(BaseModel):
-    """
-    Step-based learning-rate scheduler settings for multi-step TD training.
-
-    Args:
-        type: Scheduler name. ``"none"`` disables scheduling.
-        t_max: Cosine-annealing period in optimizer steps.
-        eta_min: Minimum learning rate reached by cosine schedules.
-        warmup_steps: Number of optimizer steps used for linear warmup before
-            cosine decay.
-        warmup_ratio: Fraction of total updates used for warmup when
-            ``warmup_steps`` is omitted.
-        warmup_start_factor: Initial warmup multiplier applied to the base
-            learning rate.
-        t0: First cycle length for cosine warm restarts.
-        t_mult: Cycle-length multiplier used after each warm restart.
-
-    Raises:
-        ValueError: If ``type`` is unsupported for this trainer.
-
-    """
-
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-    type: str = "none"
-    t_max: int | None = Field(default=None, ge=1)
-    eta_min: float | None = Field(default=None, ge=0.0)
-    warmup_steps: int | None = Field(default=None, ge=1)
-    warmup_ratio: float | None = Field(default=None, gt=0.0)
-    warmup_start_factor: float | None = Field(default=None, gt=0.0)
-    t0: int | None = Field(default=None, ge=1)
-    t_mult: int | None = Field(default=None, ge=1)
-
-    @property
-    def scheduler_type(self) -> str:
-        """Return the normalized scheduler type string."""
-        return str(self.type).strip().lower()
-
-    @model_validator(mode="after")
-    def validate_config(self) -> TDLearningRateSchedulerConfig:
-        """
-        Validate scheduler support for the multi-step TD trainer.
-
-        Returns:
-            The validated scheduler config instance.
-
-        Raises:
-            ValueError: If ``type`` is unsupported for this trainer.
-
-        """
-        allowed_types = {
-            "none",
-            "null",
-            "off",
-            "",
-            "cosine",
-            "cosine_annealing",
-            "cosine_warmup",
-            "warmup_cosine",
-            "cosine_with_warmup",
-            "cosine_restarts",
-            "cosine_restart",
-            "warm_restarts",
-        }
-        if self.scheduler_type not in allowed_types:
-            raise ValueError(
-                "lr_scheduler.type must be one of: "
-                '"none", "cosine", "cosine_warmup", or "cosine_restarts".'
-            )
-        return self
-
-    def to_log_dict(self) -> dict[str, Any]:
-        """Return a flat dictionary suitable for experiment logging."""
-        return {
-            "type": self.scheduler_type,
-            "t_max": self.t_max,
-            "eta_min": self.eta_min,
-            "warmup_steps": self.warmup_steps,
-            "warmup_ratio": self.warmup_ratio,
-            "warmup_start_factor": self.warmup_start_factor,
-            "t0": self.t0,
-            "t_mult": self.t_mult,
-        }
-
-
-class TDFrontierArchiveConfig(BaseModel):
-    """
-    Frontier-archive settings for multi-step TD value learning.
-
-    Args:
-        capacity: Maximum number of states stored in the archive. ``0`` disables
-            the archive.
-        batch_size: Number of archive states mixed into each optimizer batch.
-        refresh_stride: Number of train steps between archive refresh passes.
-        candidate_width: Width used when generating longer candidate walks.
-        candidate_length: Walk length used for frontier candidates.
-        candidate_mode: Random-walk mode used for frontier candidates.
-        candidate_history_depth: Optional non-backtracking history depth for
-            frontier candidate walks.
-        suffix_fraction: Fraction of the walk suffix kept as frontier
-            candidates.
-        admissions_per_refresh: Maximum number of high-score candidates
-            considered for archive admission per refresh.
-        score_ema_decay: Exponential moving-average decay used when a state is
-            rediscovered and its archive score is updated.
-        distributed_scoring: Whether DDP ranks should coordinate frontier
-            candidate scoring and archive synchronization.
-
-    """
-
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-    capacity: int = Field(0, ge=0)
-    batch_size: int = Field(0, ge=0)
-    refresh_stride: int = Field(50, ge=0)
-    candidate_width: int | None = Field(default=None, ge=1)
-    candidate_length: int | None = Field(default=None, ge=1)
-    candidate_mode: str | None = None
-    candidate_history_depth: int | None = Field(default=None, ge=0)
-    suffix_fraction: float = Field(0.5, gt=0.0, le=1.0)
-    admissions_per_refresh: int = Field(64, ge=1)
-    score_ema_decay: float = Field(0.9, ge=0.0, le=1.0)
-    distributed_scoring: bool = True
-
-
-class MultiStepTDValueConfig(BaseModel):
-    """
-    Configuration for discounted multi-step TD value learning.
+    Configuration for multi-step Double-DQN on deterministic graphs.
 
     Args:
         num_updates: Number of optimization steps run by ``fit`` by default.
@@ -218,14 +47,13 @@ class MultiStepTDValueConfig(BaseModel):
         weight_decay: AdamW weight decay.
         target_sync_interval: Number of optimizer steps between target syncs.
         gradient_clip_norm: Optional global gradient clipping norm.
-        reward_per_step: Step cost added to non-terminal targets.
-        discount: Discount factor applied to future values.
-        n_steps: Maximum TD backup horizon.
-        td_lambda: Optional truncated TD-lambda coefficient. ``None`` uses a
-            pure ``n_steps`` target.
-        terminal_value: Value assigned to the central state.
-        generator_indices: Optional generator subset used for backups.
-        value_batch_size: Optional chunk size for target-model evaluation.
+        reward_per_step: Step cost added to sampled transitions.
+        discount: Discount factor applied to future Q-values.
+        n_steps: Maximum sampled backup horizon.
+        td_lambda: Reserved field for future Watkins-style lambda targets.
+        terminal_value: Value assigned to terminal states.
+        generator_indices: Optional subset of generator ids used by the policy.
+        value_batch_size: Optional chunk size for Q-model evaluation.
         device: Device used for the learnable model. ``"auto"`` follows the
             graph device.
         optimizer_betas: AdamW beta parameters.
@@ -235,6 +63,7 @@ class MultiStepTDValueConfig(BaseModel):
         frontier: Optional frontier-archive configuration.
         lipschitz: Optional Lipschitz-penalty configuration.
         parallel: GPU parallelization settings.
+        behavior: Behavior-policy configuration for sampled transitions.
 
     Raises:
         ValueError: If replay settings exceed replay capacity.
@@ -273,6 +102,7 @@ class MultiStepTDValueConfig(BaseModel):
         default_factory=TDLipschitzPenaltyConfig
     )
     parallel: TDParallelConfig = Field(default_factory=TDParallelConfig)
+    behavior: TDBehaviorPolicyConfig = Field(default_factory=TDBehaviorPolicyConfig)
 
     @property
     def target_mode(self) -> str:
@@ -280,22 +110,22 @@ class MultiStepTDValueConfig(BaseModel):
         Return the configured target mode.
 
         Returns:
-            ``"td_lambda"`` when ``td_lambda`` is enabled, otherwise
-            ``"n_step"``.
+            String describing the sampled n-step DDQN target.
 
         """
-        return "td_lambda" if self.td_lambda is not None else "n_step"
+        return f"double_q_n_step_{int(self.n_steps)}"
 
     @model_validator(mode="after")
-    def validate_config(self) -> MultiStepTDValueConfig:
+    def validate_config(self) -> MultiStepDDQNConfig:
         """
-        Validate replay-capacity consistency.
+        Validate replay-capacity and DDP consistency.
 
         Returns:
             The validated config instance.
 
         Raises:
-            ValueError: If replay thresholds exceed replay capacity.
+            ValueError: If replay thresholds exceed replay capacity or batch
+                sizes are incompatible with DDP.
 
         """
         if int(self.replay.min_size) > int(self.replay.capacity):
@@ -391,17 +221,19 @@ class MultiStepTDValueConfig(BaseModel):
             "parallel.mode": str(self.parallel.resolved_mode),
             "parallel.num_gpus": int(self.parallel.num_gpus),
             "parallel.backend": str(self.parallel.backend),
+            "behavior.mode": str(self.behavior.mode),
+            "behavior.epsilon": float(self.behavior.epsilon),
         }
 
 
-class MultiStepTDValueMetrics(BaseModel):
+class MultiStepDDQNMetrics(BaseModel):
     """
-    Metrics reported for one multi-step TD optimizer step.
+    Metrics reported for one multi-step DDQN optimizer step.
 
     Args:
         step: One-based optimizer step index.
         total_loss: Full loss used for backpropagation.
-        td_loss: Mean-squared loss against the configured TD target.
+        td_loss: Mean-squared loss against the sampled DDQN target.
         lipschitz_loss: Optional Lipschitz penalty value.
         replay_size: Replay-buffer size after the update.
 
@@ -416,16 +248,17 @@ class MultiStepTDValueMetrics(BaseModel):
     replay_size: int = Field(..., ge=0)
 
 
-class MultiStepTDValueLossState(BaseModel):
+class MultiStepDDQNLossState(BaseModel):
     """
     Tensor-valued outputs produced when scoring one replay batch.
 
     Args:
         total_loss: Full differentiable loss used for backpropagation.
-        td_loss: Mean-squared loss against the configured TD target.
+        td_loss: Mean-squared loss against the sampled DDQN target.
         lipschitz_loss: Optional Lipschitz penalty tensor.
-        predictions: Online-model value predictions for the sampled states.
-        targets: Frozen-target TD values used as regression targets.
+        predictions: Predicted ``Q(s, a)`` values for sampled actions.
+        targets: Sampled Double-DQN targets.
+        actions: Sampled behavior actions aligned with ``predictions``.
 
     """
 
@@ -436,16 +269,17 @@ class MultiStepTDValueLossState(BaseModel):
     lipschitz_loss: torch.Tensor | None = None
     predictions: torch.Tensor
     targets: torch.Tensor
+    actions: torch.Tensor
 
 
-class MultiStepTDValueStepDiagnostics(BaseModel):
+class MultiStepDDQNStepDiagnostics(BaseModel):
     """
     Detailed diagnostics collected for one optimizer step.
 
     Args:
         step: One-based optimizer step index.
         total_loss: Full loss used for optimization.
-        td_loss: Mean-squared loss against the configured TD target.
+        td_loss: Mean-squared loss against the sampled DDQN target.
         lipschitz_loss: Optional Lipschitz penalty value.
         replay_size: Replay-buffer size after the update.
         replay_fill_ratio: Fraction of replay capacity currently filled.
@@ -454,7 +288,7 @@ class MultiStepTDValueStepDiagnostics(BaseModel):
         replay_refresh_time_s: Time spent appending replay states.
         frontier_refresh_time_s: Time spent refreshing the frontier archive.
         batch_sample_time_s: Time spent sampling the optimizer batch.
-        target_compute_time_s: Time spent constructing frozen TD targets.
+        target_compute_time_s: Time spent constructing sampled DDQN targets.
         model_forward_time_s: Time spent in the online forward pass.
         backward_time_s: Time spent in ``loss.backward()``.
         optimizer_time_s: Time spent in gradient clipping, optimizer step, and
@@ -480,8 +314,9 @@ class MultiStepTDValueStepDiagnostics(BaseModel):
         frontier_score_mean: Mean score of currently archived frontier states.
         frontier_score_max: Maximum score of currently archived frontier states.
         batch_states: Sampled replay states used for the step.
-        predictions: Online-model value predictions for ``batch_states``.
-        targets: TD targets for ``batch_states``.
+        predictions: Predicted ``Q(s, a)`` values for sampled actions.
+        targets: Sampled DDQN targets for ``batch_states``.
+        actions: Sampled behavior actions aligned with ``predictions``.
 
     """
 
@@ -520,3 +355,4 @@ class MultiStepTDValueStepDiagnostics(BaseModel):
     batch_states: torch.Tensor
     predictions: torch.Tensor
     targets: torch.Tensor
+    actions: torch.Tensor

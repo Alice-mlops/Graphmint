@@ -133,8 +133,7 @@ def cpu_model_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
     """
     source = unwrap_model(model)
     return {
-        key: value.detach().cpu().clone()
-        for key, value in source.state_dict().items()
+        key: value.detach().cpu().clone() for key, value in source.state_dict().items()
     }
 
 

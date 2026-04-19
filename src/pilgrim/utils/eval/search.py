@@ -76,4 +76,4 @@ def solution_length(solution: Sequence[object] | str | None) -> int:
         if solution == "":
             return 0
         return int(solution.count(".") + 1)
-    return int(len(solution))
+    return len(solution)

@@ -25,9 +25,17 @@ class AlGraphGPTConfig(BaseModel):
     input_encoder: nn.Module | None = None
     input_encoder_out_dim: int | None = Field(default=None, ge=1)
     input_encoder_type: Literal[
-        "onehot_linear", "embedding_flatten", "lehmer", "lehmer-breakpoints"
+        "onehot_linear",
+        "embedding_flatten",
+        "lehmer",
+        "lehmer-breakpoints",
+        "megaminx",
     ] = "onehot_linear"
     embedding_dim: int | None = Field(default=None, ge=1)
+    megaminx_embedding_dim: int | None = Field(default=None, ge=1)
+    megaminx_num_faces: int = Field(12, ge=1)
+    megaminx_use_inverse: bool = True
+    megaminx_use_graph_breakpoints: bool = True
 
     # Transformer settings.
     algraphgpt_d_model: int = Field(..., ge=1)
@@ -42,11 +50,14 @@ class AlGraphGPTConfig(BaseModel):
     algraphgpt_norm_type: Literal["layernorm", "rmsnorm"] = "layernorm"
     algraphgpt_norm_eps: float = Field(1e-5, gt=0.0)
     algraphgpt_rezero_init: float | None = None
+    algraphgpt_output_dim: int = Field(1, ge=1)
+    algraphgpt_aux_output_dim: int | None = Field(default=None, ge=1)
 
-    # Random-walk neighborhood settings (Alice-compatible).
+    # Neighborhood-token settings (Alice-compatible).
     generator_moves: torch.Tensor | Sequence[Sequence[int]] | None = None
     generator_inverse_map: torch.Tensor | Sequence[int] | None = None
 
+    alice_token_source: Literal["random_walk", "one_hop"] = "random_walk"
     alice_num_walks: int = Field(0, ge=0)
     alice_walk_length: int = Field(0, ge=0)
     alice_include_self: bool = False
@@ -80,7 +91,23 @@ class AlGraphGPTConfig(BaseModel):
             )
 
         if (
-            self.alice_num_walks > 0
+            self.input_encoder is None
+            and self.input_encoder_type == "megaminx"
+            and self.state_size % self.megaminx_num_faces != 0
+        ):
+            raise ValueError(
+                "state_size must be divisible by megaminx_num_faces when "
+                "input_encoder_type='megaminx'."
+            )
+
+        if self.alice_token_source == "one_hop" and self.generator_moves is None:
+            raise ValueError(
+                "generator_moves is required when alice_token_source='one_hop'."
+            )
+
+        if (
+            self.alice_token_source == "random_walk"
+            and self.alice_num_walks > 0
             and self.alice_walk_length > 0
             and self.generator_moves is None
         ):

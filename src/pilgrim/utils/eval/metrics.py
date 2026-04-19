@@ -3,10 +3,9 @@
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from collections.abc import Sequence
-
-import math
 
 from pilgrim.schemas.eval.datasets import BenchmarkItem
 from pilgrim.schemas.eval.results import EvaluationItemResult, EvaluationSliceResult
@@ -131,9 +130,7 @@ def build_family_slices(
     for item_result in item_results:
         for metric_key in metric_keys:
             value = item_result.metrics.get(metric_key)
-            if isinstance(value, bool):
-                grouped_metrics[item_result.family][metric_key].append(float(value))
-            elif isinstance(value, int | float):
+            if isinstance(value, bool) or isinstance(value, int | float):
                 grouped_metrics[item_result.family][metric_key].append(float(value))
 
     slices: list[EvaluationSliceResult] = []
@@ -181,10 +178,7 @@ def build_distance_slices(
         if item_result is None:
             continue
         value = item_result.metrics.get(metric_key)
-        if isinstance(value, bool):
-            grouped_values[int(item.exact_distance)].append(float(value))
-            grouped_counts[int(item.exact_distance)] += 1
-        elif isinstance(value, int | float):
+        if isinstance(value, bool) or isinstance(value, int | float):
             grouped_values[int(item.exact_distance)].append(float(value))
             grouped_counts[int(item.exact_distance)] += 1
 

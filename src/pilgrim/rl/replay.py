@@ -1,4 +1,4 @@
-# Implements a tensor replay buffer for RL state sampling.
+# Implements replay buffers for deterministic shortest-path training.
 """Replay-memory utilities for deterministic shortest-path training."""
 
 from __future__ import annotations
@@ -9,6 +9,318 @@ from dataclasses import dataclass
 import torch
 
 _EXPECTED_STATE_NDIM = 2
+
+
+def _normalize_state_rows(
+    states: torch.Tensor,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Convert input states into the canonical replay tensor layout.
+
+    Args:
+        states: Input state tensor.
+        device: Target device for the normalized tensor.
+
+    Returns:
+        Tensor with rank ``2`` stored as ``torch.long`` on ``device``.
+
+    Raises:
+        ValueError: If the input has rank greater than ``2``.
+
+    """
+    data = torch.as_tensor(states, device=device).long()
+    if data.ndim == 1:
+        data = data.unsqueeze(0)
+    if data.ndim != _EXPECTED_STATE_NDIM:
+        raise ValueError(
+            "states must have shape (batch, state_size) or (state_size,), "
+            f"got {tuple(data.shape)}."
+        )
+    return data.contiguous()
+
+
+def _normalize_1d_tensor(
+    values: torch.Tensor,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    name: str,
+) -> torch.Tensor:
+    """
+    Normalize a one-dimensional replay-aligned tensor.
+
+    Args:
+        values: Input tensor-like object.
+        device: Target device for the normalized tensor.
+        dtype: Target dtype for the returned tensor.
+        name: Field name used in validation errors.
+
+    Returns:
+        One-dimensional contiguous tensor on ``device``.
+
+    Raises:
+        ValueError: If the tensor cannot be normalized to rank ``1``.
+
+    """
+    data = torch.as_tensor(values, device=device, dtype=dtype).reshape(-1)
+    if data.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional, got {tuple(data.shape)}.")
+    return data.contiguous()
+
+
+def _sample_indices(
+    *,
+    size: int,
+    batch_size: int,
+    device: torch.device,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """
+    Sample replay row indices uniformly without replacement guarantees.
+
+    Args:
+        size: Number of valid replay rows.
+        batch_size: Requested batch size.
+        device: Device used for the sampled index tensor.
+        generator: Optional RNG used for sampling.
+
+    Returns:
+        One-dimensional tensor of sampled replay indices.
+
+    Raises:
+        ValueError: If ``batch_size`` is not positive.
+        RuntimeError: If ``size`` is zero.
+
+    """
+    if int(batch_size) <= 0:
+        raise ValueError("batch_size must be positive.")
+    if int(size) <= 0:
+        raise RuntimeError("cannot sample from an empty replay buffer.")
+    sample_size = min(int(batch_size), int(size))
+    return torch.randint(
+        low=0,
+        high=int(size),
+        size=(sample_size,),
+        generator=generator,
+        device=device,
+    )
+
+
+def _write_ring_tensor(
+    storage: torch.Tensor,
+    data: torch.Tensor,
+    *,
+    next_index: int,
+) -> tuple[int, int]:
+    """
+    Write one aligned batch into a ring-buffer tensor.
+
+    Args:
+        storage: Preallocated ring-buffer tensor.
+        data: Batch of rows to append.
+        next_index: Current write cursor inside ``storage``.
+
+    Returns:
+        Tuple ``(written_rows, next_index_after_write)``.
+
+    """
+    write_count = int(data.shape[0])
+    capacity = int(storage.shape[0])
+    if write_count >= capacity:
+        storage.copy_(data[-capacity:])
+        return capacity, 0
+
+    end_index = int(next_index) + write_count
+    if end_index <= capacity:
+        storage[int(next_index) : end_index] = data
+    else:
+        first_chunk = capacity - int(next_index)
+        second_chunk = write_count - first_chunk
+        storage[int(next_index) :] = data[:first_chunk]
+        storage[:second_chunk] = data[first_chunk:]
+    return write_count, (int(next_index) + write_count) % capacity
+
+
+@dataclass(slots=True, frozen=True)
+class TransitionBatch:
+    """
+    Aligned batch of deterministic n-step transitions.
+
+    Args:
+        states: Source states with shape ``(batch, state_size)``.
+        actions: First-step actions with shape ``(batch,)``.
+        next_states: States reached after ``steps`` transitions.
+        steps: Number of transitions collapsed into each row.
+        done: Whether the rollout reached the terminal center state.
+
+    """
+
+    states: torch.Tensor
+    actions: torch.Tensor
+    next_states: torch.Tensor
+    steps: torch.Tensor
+    done: torch.Tensor
+
+    def __post_init__(self) -> None:
+        """
+        Validate tensor shapes and batch alignment.
+
+        Raises:
+            ValueError: If one of the tensors is not batch-aligned.
+
+        """
+        state_device = torch.as_tensor(self.states).device
+        batch_states = _normalize_state_rows(self.states, device=state_device)
+        batch_next_states = _normalize_state_rows(
+            self.next_states,
+            device=state_device,
+        )
+        batch_actions = _normalize_1d_tensor(
+            self.actions,
+            device=state_device,
+            dtype=torch.long,
+            name="actions",
+        )
+        batch_steps = _normalize_1d_tensor(
+            self.steps,
+            device=state_device,
+            dtype=torch.long,
+            name="steps",
+        )
+        batch_done = _normalize_1d_tensor(
+            self.done,
+            device=state_device,
+            dtype=torch.bool,
+            name="done",
+        )
+        batch_size = int(batch_states.shape[0])
+        if int(batch_next_states.shape[0]) != batch_size:
+            raise ValueError("next_states must align with states.")
+        if int(batch_actions.shape[0]) != batch_size:
+            raise ValueError("actions must align with states.")
+        if int(batch_steps.shape[0]) != batch_size:
+            raise ValueError("steps must align with states.")
+        if int(batch_done.shape[0]) != batch_size:
+            raise ValueError("done must align with states.")
+        object.__setattr__(self, "states", batch_states)
+        object.__setattr__(self, "actions", batch_actions)
+        object.__setattr__(self, "next_states", batch_next_states)
+        object.__setattr__(self, "steps", batch_steps)
+        object.__setattr__(self, "done", batch_done)
+
+    def __len__(self) -> int:
+        """
+        Return the batch size.
+
+        Returns:
+            Number of aligned transition rows.
+
+        """
+        return int(self.states.shape[0])
+
+    def to(self, device: str | torch.device) -> TransitionBatch:
+        """
+        Move all batch tensors to a target device.
+
+        Args:
+            device: Destination device.
+
+        Returns:
+            Transition batch on ``device``.
+
+        """
+        target_device = torch.device(device)
+        return TransitionBatch(
+            states=self.states.to(target_device),
+            actions=self.actions.to(target_device),
+            next_states=self.next_states.to(target_device),
+            steps=self.steps.to(target_device),
+            done=self.done.to(target_device),
+        )
+
+    def index_select(self, indices: torch.Tensor) -> TransitionBatch:
+        """
+        Select a subset of transition rows.
+
+        Args:
+            indices: One-dimensional integer row indices.
+
+        Returns:
+            New transition batch containing the selected rows.
+
+        """
+        rows = torch.as_tensor(indices, device=self.states.device).long().reshape(-1)
+        return TransitionBatch(
+            states=self.states.index_select(0, rows),
+            actions=self.actions.index_select(0, rows),
+            next_states=self.next_states.index_select(0, rows),
+            steps=self.steps.index_select(0, rows),
+            done=self.done.index_select(0, rows),
+        )
+
+
+def concatenate_transition_batches(
+    batches: list[TransitionBatch],
+) -> TransitionBatch:
+    """
+    Concatenate multiple aligned transition batches.
+
+    Args:
+        batches: Non-empty list of transition batches.
+
+    Returns:
+        Concatenated transition batch.
+
+    Raises:
+        ValueError: If ``batches`` is empty.
+
+    """
+    if not batches:
+        raise ValueError("at least one transition batch is required.")
+    if len(batches) == 1:
+        return batches[0]
+    return TransitionBatch(
+        states=torch.cat([batch.states for batch in batches], dim=0),
+        actions=torch.cat([batch.actions for batch in batches], dim=0),
+        next_states=torch.cat([batch.next_states for batch in batches], dim=0),
+        steps=torch.cat([batch.steps for batch in batches], dim=0),
+        done=torch.cat([batch.done for batch in batches], dim=0),
+    )
+
+
+def subsample_transition_batch(
+    batch: TransitionBatch,
+    *,
+    max_transitions: int,
+    seed: int | None = None,
+) -> TransitionBatch:
+    """
+    Randomly subsample transition rows without replacement.
+
+    Args:
+        batch: Transition batch to subsample.
+        max_transitions: Maximum number of rows to keep.
+        seed: Optional deterministic seed for the row permutation.
+
+    Returns:
+        Original batch when ``len(batch) <= max_transitions``; otherwise a
+        randomly selected subset.
+
+    Raises:
+        ValueError: If ``max_transitions`` is not positive.
+
+    """
+    if int(max_transitions) <= 0:
+        raise ValueError("max_transitions must be positive.")
+    if len(batch) <= int(max_transitions):
+        return batch
+    generator = torch.Generator(device="cpu")
+    if seed is not None:
+        generator.manual_seed(int(seed))
+    indices = torch.randperm(len(batch), generator=generator)[: int(max_transitions)]
+    return batch.index_select(indices.to(batch.states.device))
 
 
 class TensorReplayBuffer:
@@ -130,13 +442,11 @@ class TensorReplayBuffer:
         if self._storage is None or self._size == 0:
             raise RuntimeError("cannot sample from an empty replay buffer.")
 
-        sample_size = min(int(batch_size), int(self._size))
-        idx = torch.randint(
-            low=0,
-            high=int(self._size),
-            size=(sample_size,),
-            generator=generator,
+        idx = _sample_indices(
+            size=int(self._size),
+            batch_size=int(batch_size),
             device=self.storage_device,
+            generator=generator,
         )
         batch = self._storage[idx]
         if device is not None:
@@ -204,19 +514,230 @@ class TensorReplayBuffer:
             Tensor with rank ``2`` stored as ``torch.long`` on the storage
             device.
 
-        Raises:
-            ValueError: If the input has rank greater than ``2``.
+        """
+        return _normalize_state_rows(states, device=self.storage_device)
+
+
+class TransitionReplayBuffer:
+    """
+    Ring-buffer replay storage for aligned transition batches.
+
+    Args:
+        capacity: Maximum number of transitions stored in the buffer.
+        storage_device: Device used for the internal storage tensors.
+
+    Raises:
+        ValueError: If ``capacity`` is not positive.
+
+    """
+
+    def __init__(
+        self,
+        capacity: int,
+        *,
+        storage_device: str | torch.device = "cpu",
+    ) -> None:
+        if int(capacity) <= 0:
+            raise ValueError("capacity must be positive.")
+        self.capacity = int(capacity)
+        self.storage_device = torch.device(storage_device)
+        self._states: torch.Tensor | None = None
+        self._actions: torch.Tensor | None = None
+        self._next_states: torch.Tensor | None = None
+        self._steps: torch.Tensor | None = None
+        self._done: torch.Tensor | None = None
+        self._size = 0
+        self._next_index = 0
+
+    def __len__(self) -> int:
+        """
+        Return the number of currently stored transitions.
+
+        Returns:
+            Number of valid rows inside the transition replay buffer.
 
         """
-        data = torch.as_tensor(states, device=self.storage_device).long()
-        if data.ndim == 1:
-            data = data.unsqueeze(0)
-        if data.ndim != _EXPECTED_STATE_NDIM:
-            raise ValueError(
-                "states must have shape (batch, state_size) or (state_size,), "
-                f"got {tuple(data.shape)}."
-            )
-        return data.contiguous()
+        return int(self._size)
+
+    @property
+    def is_initialized(self) -> bool:
+        """
+        Return whether the backing tensors have been allocated.
+
+        Returns:
+            ``True`` when the internal storage tensors exist.
+
+        """
+        return self._states is not None
+
+    def add(self, batch: TransitionBatch) -> int:
+        """
+        Append transitions to replay memory.
+
+        Args:
+            batch: Transition batch to append.
+
+        Returns:
+            Number of transition rows written into the buffer.
+
+        Raises:
+            ValueError: If ``batch`` is empty.
+
+        """
+        transitions = batch.to(self.storage_device)
+        if len(transitions) == 0:
+            raise ValueError("transition batch must contain at least one row.")
+        if self._states is None:
+            self._allocate_storage(transitions)
+
+        assert self._states is not None
+        assert self._actions is not None
+        assert self._next_states is not None
+        assert self._steps is not None
+        assert self._done is not None
+
+        written, next_index = _write_ring_tensor(
+            self._states,
+            transitions.states,
+            next_index=self._next_index,
+        )
+        _write_ring_tensor(
+            self._actions,
+            transitions.actions,
+            next_index=self._next_index,
+        )
+        _write_ring_tensor(
+            self._next_states,
+            transitions.next_states,
+            next_index=self._next_index,
+        )
+        _write_ring_tensor(
+            self._steps,
+            transitions.steps,
+            next_index=self._next_index,
+        )
+        _write_ring_tensor(
+            self._done,
+            transitions.done,
+            next_index=self._next_index,
+        )
+        self._next_index = next_index
+        self._size = min(self.capacity, self._size + written)
+        return written
+
+    def sample(
+        self,
+        batch_size: int,
+        *,
+        generator: torch.Generator | None = None,
+        device: str | torch.device | None = None,
+    ) -> TransitionBatch:
+        """
+        Sample a batch of transitions uniformly from replay memory.
+
+        Args:
+            batch_size: Number of transitions to sample.
+            generator: Optional torch random generator used for sampling.
+            device: Optional device for the returned batch.
+
+        Returns:
+            Sampled transition batch.
+
+        Raises:
+            RuntimeError: If the buffer is empty.
+            ValueError: If ``batch_size`` is not positive.
+
+        """
+        if int(batch_size) <= 0:
+            raise ValueError("batch_size must be positive.")
+        if self._states is None or self._size == 0:
+            raise RuntimeError("cannot sample from an empty replay buffer.")
+        idx = _sample_indices(
+            size=int(self._size),
+            batch_size=int(batch_size),
+            device=self.storage_device,
+            generator=generator,
+        )
+        batch = TransitionBatch(
+            states=self._states[idx],
+            actions=self._actions[idx],
+            next_states=self._next_states[idx],
+            steps=self._steps[idx],
+            done=self._done[idx],
+        )
+        if device is not None:
+            return batch.to(device)
+        return batch
+
+    def is_ready(self, min_size: int) -> bool:
+        """
+        Return whether the buffer holds enough transitions for training.
+
+        Args:
+            min_size: Required minimum number of stored transitions.
+
+        Returns:
+            ``True`` if ``len(self) >= min_size``.
+
+        """
+        return len(self) >= int(min_size)
+
+    def state_shape(self) -> tuple[int, ...] | None:
+        """
+        Return the shape of one stored state.
+
+        Returns:
+            State shape excluding the batch dimension, or ``None`` before the
+            first write.
+
+        """
+        if self._states is None:
+            return None
+        return tuple(int(x) for x in self._states.shape[1:])
+
+    def storage_usage_ratio(self) -> float:
+        """
+        Return the fill ratio of replay memory.
+
+        Returns:
+            Fraction in the closed interval ``[0.0, 1.0]``.
+
+        """
+        return float(self._size) / float(self.capacity)
+
+    def _allocate_storage(self, batch: TransitionBatch) -> None:
+        """
+        Allocate replay tensors using the first observed transition batch.
+
+        Args:
+            batch: Normalized transition batch used to define storage shapes.
+
+        """
+        self._states = torch.empty(
+            (self.capacity, *batch.states.shape[1:]),
+            dtype=batch.states.dtype,
+            device=self.storage_device,
+        )
+        self._actions = torch.empty(
+            (self.capacity,),
+            dtype=batch.actions.dtype,
+            device=self.storage_device,
+        )
+        self._next_states = torch.empty(
+            (self.capacity, *batch.next_states.shape[1:]),
+            dtype=batch.next_states.dtype,
+            device=self.storage_device,
+        )
+        self._steps = torch.empty(
+            (self.capacity,),
+            dtype=batch.steps.dtype,
+            device=self.storage_device,
+        )
+        self._done = torch.empty(
+            (self.capacity,),
+            dtype=batch.done.dtype,
+            device=self.storage_device,
+        )
 
 
 @dataclass(slots=True)
@@ -467,7 +988,9 @@ class FrontierStateArchive:
         """
         if self._size == 0:
             if self._storage is None:
-                states = torch.empty((0, 0), dtype=torch.long, device=self.storage_device)
+                states = torch.empty(
+                    (0, 0), dtype=torch.long, device=self.storage_device
+                )
             else:
                 states = self._storage[:0].clone()
             return FrontierArchiveSnapshot(
@@ -495,9 +1018,9 @@ class FrontierStateArchive:
 
         """
         states = torch.as_tensor(snapshot.states, device=self.storage_device).long()
-        hashes = torch.as_tensor(snapshot.hashes, device="cpu", dtype=torch.int64).reshape(
-            -1
-        )
+        hashes = torch.as_tensor(
+            snapshot.hashes, device="cpu", dtype=torch.int64
+        ).reshape(-1)
         scores = torch.as_tensor(
             snapshot.scores,
             device=self.storage_device,

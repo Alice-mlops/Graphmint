@@ -4,6 +4,13 @@
 from __future__ import annotations
 
 from .distributed_run import DistributedMultiStepTDRunSpec
+from .multistep_ddqn import (
+    MultiStepDDQNConfig,
+    MultiStepDDQNLossState,
+    MultiStepDDQNMetrics,
+    MultiStepDDQNStepDiagnostics,
+    TDBehaviorPolicyConfig,
+)
 from .multistep_td_value_iteration import (
     MultiStepTDValueConfig,
     MultiStepTDValueLossState,
@@ -16,14 +23,39 @@ from .multistep_td_value_iteration import (
     TDReplayBufferConfig,
 )
 from .parallel import TDParallelConfig, TDSecondaryGpuEvalConfig
+from .search_guided_ppo import (
+    SearchGuidedPPOAuxLossConfig,
+    SearchGuidedPPOBeamSearchConfig,
+    SearchGuidedPPOConfig,
+    SearchGuidedPPOLossState,
+    SearchGuidedPPOMetrics,
+    SearchGuidedPPORewardConfig,
+    SearchGuidedPPORolloutConfig,
+    SearchGuidedPPOStepDiagnostics,
+    SearchGuidedPPOSupervisionConfig,
+)
 from .tracking import TDFileTrackerConfig, TDProbeEvaluationConfig
 
 __all__ = [
     "DistributedMultiStepTDRunSpec",
+    "MultiStepDDQNConfig",
+    "MultiStepDDQNLossState",
+    "MultiStepDDQNMetrics",
+    "MultiStepDDQNStepDiagnostics",
     "MultiStepTDValueConfig",
     "MultiStepTDValueLossState",
     "MultiStepTDValueMetrics",
     "MultiStepTDValueStepDiagnostics",
+    "SearchGuidedPPOAuxLossConfig",
+    "SearchGuidedPPOBeamSearchConfig",
+    "SearchGuidedPPOConfig",
+    "SearchGuidedPPOLossState",
+    "SearchGuidedPPOMetrics",
+    "SearchGuidedPPORewardConfig",
+    "SearchGuidedPPORolloutConfig",
+    "SearchGuidedPPOStepDiagnostics",
+    "SearchGuidedPPOSupervisionConfig",
+    "TDBehaviorPolicyConfig",
     "TDFileTrackerConfig",
     "TDFrontierArchiveConfig",
     "TDLearningRateSchedulerConfig",

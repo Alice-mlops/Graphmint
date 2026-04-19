@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 from .outward_expansion import (
-    OutwardExpansionConfig,
     OutwardExpansionCandidate,
+    OutwardExpansionConfig,
     OutwardExpansionResult,
 )
 

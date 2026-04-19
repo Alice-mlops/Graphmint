@@ -14,10 +14,6 @@ import pandas as pd
 import torch
 import yaml
 from lightning.pytorch import Callback, LightningModule, Trainer
-from torch import nn
-from torch.nn import functional as F
-from torch.profiler import ProfilerActivity, profile
-
 from pilgrim.pancake_competition import (
     BeamInferenceConfig,
     compute_stats_by_n,
@@ -26,6 +22,9 @@ from pilgrim.pancake_competition import (
 )
 from pilgrim.utils.pancake_utils import make_graph_for_n, pancake_sort_path, solve
 from pilgrim.utils.reproducibility import set_seed
+from torch import nn
+from torch.nn import functional as F
+from torch.profiler import ProfilerActivity, profile
 
 from .config import LipschitzConfig, OptimizationConfig, RandomWalkDataConfig
 from .data import RandomWalkDataModule

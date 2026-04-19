@@ -1,4 +1,4 @@
-"""AlGraphGPT model with vectorized random-walk neighborhood sampling."""
+"""AlGraphGPT model with configurable neighborhood-token sampling."""
 
 from __future__ import annotations
 
@@ -12,7 +12,12 @@ from torch import nn
 
 from ..schemas.al_graph_gpt_config import AlGraphGPTConfig
 from .model_blocks import build_node_encoder
-from .model_blocks.al_graph_gpt_blocks import AlGraphGPTLayer, make_norm
+from .model_blocks.al_graph_gpt_blocks import (
+    AlGraphGPTLayer,
+    AlGraphGPTReadoutHead,
+    make_norm,
+    run_readout_heads,
+)
 
 _FLATTEN_TO_2D_DIM_THRESHOLD = 2
 _GENERATOR_MOVES_EXPECTED_NDIM = 2
@@ -76,7 +81,7 @@ def _compute_inverse_generator_map(generator_moves: torch.Tensor) -> torch.Tenso
 
 
 class AlGraphGPT(nn.Module):
-    """Stacked center-query graph Transformer with random-walk token memory."""
+    """Stacked center-query graph Transformer with configurable token memory."""
 
     def __init__(self, config: AlGraphGPTConfig) -> None:
         """
@@ -92,7 +97,12 @@ class AlGraphGPT(nn.Module):
         self.state_size: int = int(config.state_size)
         self.num_classes: int = int(config.num_classes)
         self.d_model: int = int(config.algraphgpt_d_model)
-        self.output_dim: int = 1
+        self.output_dim: int = int(config.algraphgpt_output_dim)
+        self.aux_output_dim: int | None = (
+            None
+            if config.algraphgpt_aux_output_dim is None
+            else int(config.algraphgpt_aux_output_dim)
+        )
 
         self.num_layers: int = int(config.algraphgpt_num_layers)
         self.norm_position: str = str(config.algraphgpt_norm_position).strip().lower()
@@ -107,7 +117,8 @@ class AlGraphGPT(nn.Module):
             else nn.Linear(int(encoder_out_dim), self.d_model)
         )
 
-        # --- Random-walk neighborhood configuration ---
+        # --- Neighborhood-token configuration ---
+        self.token_source: str = str(config.alice_token_source).strip().lower()
         self.num_walks: int = int(config.alice_num_walks)
         self.walk_length: int = int(config.alice_walk_length)
         self.include_self: bool = bool(config.alice_include_self)
@@ -123,11 +134,14 @@ class AlGraphGPT(nn.Module):
         self.use_gen_emb: bool = bool(config.alice_use_gen_emb)
 
         generator_moves_cfg = config.generator_moves
-        if self.num_walks > 0 and self.walk_length > 0:
+        requires_generator_moves = self.token_source == "one_hop" or (
+            self.num_walks > 0 and self.walk_length > 0
+        )
+        if requires_generator_moves:
             if generator_moves_cfg is None:
                 raise ValueError(
-                    "AlGraphGPT requires generator_moves when alice_num_walks > 0 "
-                    "and alice_walk_length > 0."
+                    "AlGraphGPT requires generator_moves when neighborhood "
+                    "token sampling is enabled."
                 )
             generator_moves = _as_long_tensor(generator_moves_cfg)
             if (
@@ -176,6 +190,8 @@ class AlGraphGPT(nn.Module):
 
         if self.use_hop_emb:
             max_hop = self.walk_length + (1 if self.include_self else 0)
+            if self.token_source == "one_hop":
+                max_hop = max(1, max_hop)
             self.hop_emb = nn.Embedding(max_hop + 1, self.d_model)
         else:
             self.hop_emb = None
@@ -206,7 +222,12 @@ class AlGraphGPT(nn.Module):
             )
             layer.enable_operation_profiling(False)
         self.final_norm = make_norm(self.norm_type, self.d_model, self.norm_eps)
-        self.output_layer = nn.Linear(self.d_model, self.output_dim)
+        self.output_layer = AlGraphGPTReadoutHead(self.d_model, self.output_dim)
+        self.aux_output_layer = (
+            None
+            if self.aux_output_dim is None
+            else AlGraphGPTReadoutHead(self.d_model, self.aux_output_dim)
+        )
 
     def enable_operation_profiling(self, enabled: bool, *, reset: bool = False) -> None:
         """
@@ -634,6 +655,77 @@ class AlGraphGPT(nn.Module):
         self._op_timer_stop("walk/sample_tokens_total", t0_total, tokens_z)
         return tokens_z, hop_ids, walk_ids, tokens_gen
 
+    def _build_one_hop_tokens(
+        self, z: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Enumerate exact one-hop neighbor tokens and one self token.
+
+        Args:
+            z: Input decoded states of shape ``(batch, state_size)``.
+
+        Returns:
+            Tuple ``(tokens_z, hop_ids, walk_ids, gen_ids)`` where:
+            - ``tokens_z`` has shape ``(batch, 1 + n_neighbors, state_size)``,
+            - ``hop_ids`` has shape ``(batch, 1 + n_neighbors)``,
+            - ``walk_ids`` has shape ``(batch, 1 + n_neighbors)``,
+            - ``gen_ids`` has shape ``(batch, 1 + n_neighbors)``.
+
+        Raises:
+            ValueError: If no generator ids are available for one-hop expansion.
+
+        """
+        t0_total = self._op_timer_start(z)
+        if z.ndim == 1:
+            z = z.unsqueeze(0)
+
+        batch_size = int(z.size(0))
+
+        t0_select_allowed = self._op_timer_start(z)
+        allowed = self._select_allowed_generators(device=z.device)
+        self._op_timer_stop("one_hop/select_allowed_generators", t0_select_allowed, z)
+        if allowed.numel() == 0:
+            raise ValueError("No generators available for one-hop token expansion.")
+
+        t0_neighbors = self._op_timer_start(z)
+        moves = self.generator_moves.index_select(0, allowed).to(z.device)
+        neighbor_states = torch.gather(
+            z.unsqueeze(1).expand(batch_size, allowed.numel(), self.state_size),
+            dim=2,
+            index=moves.unsqueeze(0).expand(batch_size, -1, -1),
+        )
+        self._op_timer_stop(
+            "one_hop/enumerate_neighbors", t0_neighbors, neighbor_states
+        )
+
+        tokens_z = torch.cat([z.unsqueeze(1), neighbor_states], dim=1)
+        hop_ids = torch.cat(
+            [
+                torch.zeros((batch_size, 1), device=z.device, dtype=torch.long),
+                torch.ones(
+                    (batch_size, allowed.numel()),
+                    device=z.device,
+                    dtype=torch.long,
+                ),
+            ],
+            dim=1,
+        )
+        walk_ids = torch.zeros(
+            (batch_size, 1 + allowed.numel()),
+            device=z.device,
+            dtype=torch.long,
+        )
+        self_gen_ids = torch.full(
+            (batch_size, 1),
+            fill_value=int(self.gen_start_id) if self.gen_start_id >= 0 else 0,
+            device=z.device,
+            dtype=torch.long,
+        )
+        neighbor_gen_ids = allowed.view(1, -1).expand(batch_size, -1)
+        gen_ids = torch.cat([self_gen_ids, neighbor_gen_ids], dim=1)
+        self._op_timer_stop("one_hop/build_tokens_total", t0_total, tokens_z)
+        return tokens_z, hop_ids, walk_ids, gen_ids
+
     def _encode_walk_tokens(self, z: torch.Tensor) -> torch.Tensor | None:
         """
         Sample, encode, and tag neighborhood walk tokens.
@@ -666,15 +758,15 @@ class AlGraphGPT(nn.Module):
 
         if self.hop_emb is not None:
             t0_hop = self._op_timer_start(tok)
-            tok = tok + self.hop_emb(hop_ids).to(tok.dtype)
+            tok += self.hop_emb(hop_ids).to(tok.dtype)
             self._op_timer_stop("walk/add_hop_embedding", t0_hop, tok)
         if self.walk_emb is not None:
             t0_walk = self._op_timer_start(tok)
-            tok = tok + self.walk_emb(walk_ids).to(tok.dtype)
+            tok += self.walk_emb(walk_ids).to(tok.dtype)
             self._op_timer_stop("walk/add_walk_embedding", t0_walk, tok)
         if self.gen_emb is not None:
             t0_gen = self._op_timer_start(tok)
-            tok = tok + self.gen_emb(gen_ids.clamp(min=0, max=self.n_generators)).to(
+            tok += self.gen_emb(gen_ids.clamp(min=0, max=self.n_generators)).to(
                 tok.dtype
             )
             self._op_timer_stop("walk/add_generator_embedding", t0_gen, tok)
@@ -682,15 +774,69 @@ class AlGraphGPT(nn.Module):
         self._op_timer_stop("walk/encode_tokens_total", t0_total, tok)
         return tok
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
+    def _encode_one_hop_tokens(self, z: torch.Tensor) -> torch.Tensor | None:
         """
-        Run model forward pass.
+        Enumerate, encode, and tag exact one-hop neighborhood tokens.
+
+        Args:
+            z: Input decoded states of shape ``(batch, state_size)``.
+
+        Returns:
+            Token embeddings of shape ``(batch, 1 + n_neighbors, d_model)``.
+
+        """
+        t0_total = self._op_timer_start(z)
+        tokens_z, hop_ids, _, gen_ids = self._build_one_hop_tokens(z)
+        flat_tokens = tokens_z.reshape(-1, self.state_size)
+        tok = self._encode_states_2d(
+            flat_tokens,
+            op_name="one_hop/token_state_encode",
+        ).view(z.size(0), tokens_z.size(1), self.d_model)
+
+        if self.hop_emb is not None:
+            t0_hop = self._op_timer_start(tok)
+            tok += self.hop_emb(hop_ids).to(tok.dtype)
+            self._op_timer_stop("one_hop/add_hop_embedding", t0_hop, tok)
+        if self.gen_emb is not None:
+            t0_gen = self._op_timer_start(tok)
+            tok += self.gen_emb(gen_ids.clamp(min=0, max=self.n_generators)).to(
+                tok.dtype
+            )
+            self._op_timer_stop("one_hop/add_generator_embedding", t0_gen, tok)
+
+        self._op_timer_stop("one_hop/encode_tokens_total", t0_total, tok)
+        return tok
+
+    def _encode_context_tokens(self, z: torch.Tensor) -> torch.Tensor | None:
+        """
+        Encode the configured neighborhood-token source.
+
+        Args:
+            z: Input decoded states of shape ``(batch, state_size)``.
+
+        Returns:
+            Context-token embeddings, or ``None`` when the selected source is
+            disabled.
+
+        Raises:
+            ValueError: If ``alice_token_source`` is unsupported.
+
+        """
+        if self.token_source == "random_walk":
+            return self._encode_walk_tokens(z)
+        if self.token_source == "one_hop":
+            return self._encode_one_hop_tokens(z)
+        raise ValueError(f"Unsupported alice_token_source: {self.token_source!r}.")
+
+    def forward_features(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Encode one state batch into center embeddings.
 
         Args:
             z: Input states of shape ``(batch, state_size)`` or ``(state_size,)``.
 
         Returns:
-            Predicted scalar values as a 1D tensor of shape ``(batch,)``.
+            Final center embeddings with shape ``(batch, d_model)``.
 
         """
         t0_total = self._op_timer_start(z)
@@ -700,8 +846,10 @@ class AlGraphGPT(nn.Module):
 
         center = self._encode_states_2d(z, op_name="forward/center_encode")
         t0_token_encode = self._op_timer_start(z)
-        tokens = self._encode_walk_tokens(z)
-        self._op_timer_stop("forward/walk_token_encode_call", t0_token_encode, center)
+        tokens = self._encode_context_tokens(z)
+        self._op_timer_stop(
+            "forward/context_token_encode_call", t0_token_encode, center
+        )
 
         x = center
         for idx, layer in enumerate(self.layers):
@@ -712,9 +860,88 @@ class AlGraphGPT(nn.Module):
         t0_final_norm = self._op_timer_start(x)
         x = self.final_norm(x)
         self._op_timer_stop("forward/final_norm", t0_final_norm, x)
-        t0_out = self._op_timer_start(x)
-        x = self.output_layer(x)
-        self._op_timer_stop("forward/output_layer", t0_out, x)
-        out = x.flatten()
-        self._op_timer_stop("forward/total", t0_total, out)
-        return out
+        self._op_timer_stop("forward/features_total", t0_total, x)
+        return x
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Run model forward pass.
+
+        Args:
+            z: Input states of shape ``(batch, state_size)`` or ``(state_size,)``.
+
+        Returns:
+            Predicted scalar values with shape ``(batch,)`` when
+            ``output_dim == 1`` and vector predictions with shape
+            ``(batch, output_dim)`` otherwise.
+
+        """
+        t0_total = self._op_timer_start(z)
+        features = self.forward_features(z)
+        t0_out = self._op_timer_start(features)
+        outputs, _ = run_readout_heads(
+            features,
+            primary_head=self.output_layer,
+        )
+        self._op_timer_stop("forward/output_layer", t0_out, outputs)
+        self._op_timer_stop("forward/total", t0_total, outputs)
+        return outputs
+
+    def forward_aux(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Run the optional auxiliary readout head.
+
+        Args:
+            z: Input states of shape ``(batch, state_size)`` or ``(state_size,)``.
+
+        Returns:
+            Auxiliary readout tensor shaped like the configured auxiliary head.
+
+        Raises:
+            ValueError: If the model was created without an auxiliary head.
+
+        """
+        if self.aux_output_layer is None:
+            raise ValueError("AlGraphGPT has no auxiliary output head configured.")
+        t0_total = self._op_timer_start(z)
+        features = self.forward_features(z)
+        t0_out = self._op_timer_start(features)
+        outputs = self.aux_output_layer(features)
+        self._op_timer_stop("forward/aux_output_layer", t0_out, outputs)
+        self._op_timer_stop("forward/aux_total", t0_total, outputs)
+        return outputs
+
+    def forward_readouts(
+        self,
+        z: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """
+        Run the primary and optional auxiliary readout heads together.
+
+        Args:
+            z: Input states of shape ``(batch, state_size)`` or ``(state_size,)``.
+
+        Returns:
+            Tuple ``(primary, auxiliary)`` where ``auxiliary`` is ``None`` when
+            the model has no auxiliary readout head.
+
+        """
+        t0_total = self._op_timer_start(z)
+        features = self.forward_features(z)
+
+        t0_primary = self._op_timer_start(features)
+        primary = self.output_layer(features)
+        self._op_timer_stop("forward/output_layer", t0_primary, primary)
+
+        auxiliary: torch.Tensor | None = None
+        if self.aux_output_layer is not None:
+            t0_aux = self._op_timer_start(features)
+            auxiliary = self.aux_output_layer(features)
+            self._op_timer_stop("forward/aux_output_layer", t0_aux, auxiliary)
+
+        self._op_timer_stop(
+            "forward/readouts_total",
+            t0_total,
+            primary if auxiliary is None else auxiliary,
+        )
+        return primary, auxiliary

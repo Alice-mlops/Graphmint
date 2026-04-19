@@ -288,9 +288,7 @@ class MultiStepTDValueTrainer:
         phase_times = MultiStepTDValuePhaseTimes()
         replay_refresh_started = time.perf_counter()
         self._maybe_refresh_replay()
-        phase_times.replay_refresh_time_s = (
-            time.perf_counter() - replay_refresh_started
-        )
+        phase_times.replay_refresh_time_s = time.perf_counter() - replay_refresh_started
 
         frontier_refresh_started = time.perf_counter()
         frontier_refresh = self._maybe_refresh_frontier_archive()
@@ -427,7 +425,9 @@ class MultiStepTDValueTrainer:
             frontier_batch_size=int(frontier_batch_size),
             frontier_refresh_applied=bool(frontier_refresh.refresh_applied),
             frontier_candidate_count=int(frontier_refresh.candidate_count),
-            frontier_unique_candidate_count=int(frontier_refresh.unique_candidate_count),
+            frontier_unique_candidate_count=int(
+                frontier_refresh.unique_candidate_count
+            ),
             frontier_selected_count=int(frontier_refresh.selected_count),
             frontier_admitted=int(frontier_refresh.admitted),
             frontier_updated=int(frontier_refresh.updated),
@@ -848,8 +848,8 @@ class MultiStepTDValueTrainer:
         sample_index = self._num_frontier_sampling_calls
         self._num_frontier_sampling_calls += 1
         if is_main_process():
-            unique_states, unique_hashes, stats = self._sample_unique_frontier_candidates(
-                sample_index=sample_index
+            unique_states, unique_hashes, stats = (
+                self._sample_unique_frontier_candidates(sample_index=sample_index)
             )
         else:
             unique_states = None
@@ -890,11 +890,7 @@ class MultiStepTDValueTrainer:
                         stats=stats,
                         update_stats=update_stats,
                     )
-                    if (
-                        stats.admitted > 0
-                        or stats.updated > 0
-                        or stats.replaced > 0
-                    ):
+                    if stats.admitted > 0 or stats.updated > 0 or stats.replaced > 0:
                         assert self.frontier_archive is not None
                         self._sync_frontier_archive_snapshot(
                             self.frontier_archive.snapshot()
@@ -1361,17 +1357,13 @@ class MultiStepTDValueTrainer:
             return
         resolved_device = self._resolve_device(self.config.device)
         if resolved_device.type != "cuda":
-            raise ValueError(
-                "parallel DDP learner mode requires a CUDA device."
-            )
+            raise ValueError("parallel DDP learner mode requires a CUDA device.")
         if resolved_device.index is None:
             raise ValueError(
                 "parallel DDP learner mode requires a concrete CUDA device index."
             )
         if not torch.cuda.is_available():
-            raise ValueError(
-                "parallel DDP learner mode requires CUDA availability."
-            )
+            raise ValueError("parallel DDP learner mode requires CUDA availability.")
         if int(self.config.parallel.num_gpus) > int(torch.cuda.device_count()):
             raise ValueError(
                 f"parallel.num_gpus={int(self.config.parallel.num_gpus)} exceeds "
@@ -1386,10 +1378,7 @@ class MultiStepTDValueTrainer:
                 "initialized. Launch through torchrun or the distributed "
                 "entrypoint."
             )
-        if (
-            is_distributed_initialized()
-            and int(distributed_world_size()) != int(self.config.parallel.world_size)
+        if is_distributed_initialized() and int(distributed_world_size()) != int(
+            self.config.parallel.world_size
         ):
-            raise ValueError(
-                "distributed world size does not match parallel.num_gpus."
-            )
+            raise ValueError("distributed world size does not match parallel.num_gpus.")

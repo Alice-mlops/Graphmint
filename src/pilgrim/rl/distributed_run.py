@@ -268,15 +268,13 @@ def build_tracker(
         return None
     probe_states, probe_targets = build_probe_batch(spec, graph)
     hparams = dict(spec.hparams)
-    hparams.update(
-        {
-            "n": int(spec.n),
-            "model_config": spec.model_kwargs,
-            "rl_config": spec.trainer_config.to_log_dict(),
-            "profile": spec.profile,
-            "notebook_name": spec.notebook_name,
-        }
-    )
+    hparams.update({
+        "n": int(spec.n),
+        "model_config": spec.model_kwargs,
+        "rl_config": spec.trainer_config.to_log_dict(),
+        "profile": spec.profile,
+        "notebook_name": spec.notebook_name,
+    })
     return TDFileMetricsTracker(
         spec.file_tracker,
         graph,
@@ -315,6 +313,7 @@ def _evaluate_rollout_summary(
         spec: Serialized run specification.
         trainer: Trained multi-step TD trainer.
         graph: Active Cayley graph instance.
+
     Returns:
         Tuple ``(center_value, greedy_rollout_length)``.
 
@@ -322,9 +321,7 @@ def _evaluate_rollout_summary(
     trainer.model.eval()
     model_device = next(trainer.model.parameters(), None)
     resolved_model_device = (
-        torch.device("cpu")
-        if model_device is None
-        else model_device.device
+        torch.device("cpu") if model_device is None else model_device.device
     )
     with torch.no_grad():
         center_state = torch.as_tensor(
@@ -374,7 +371,9 @@ def _build_summary(
         Summary mapping written next to the checkpoint.
 
     """
-    tracker_dir = None if spec.file_tracker is None else Path(spec.file_tracker.output_dir)
+    tracker_dir = (
+        None if spec.file_tracker is None else Path(spec.file_tracker.output_dir)
+    )
     jsonl_name = None if spec.file_tracker is None else spec.file_tracker.jsonl_name
     csv_name = None if spec.file_tracker is None else spec.file_tracker.csv_name
     tracker_summary_name = (
@@ -401,10 +400,14 @@ def _build_summary(
         "history_path": str(history_path),
         "tracker_dir": None if tracker_dir is None else str(tracker_dir),
         "step_log_jsonl": (
-            None if tracker_dir is None or jsonl_name is None else str(tracker_dir / jsonl_name)
+            None
+            if tracker_dir is None or jsonl_name is None
+            else str(tracker_dir / jsonl_name)
         ),
         "step_log_csv": (
-            None if tracker_dir is None or csv_name is None else str(tracker_dir / csv_name)
+            None
+            if tracker_dir is None or csv_name is None
+            else str(tracker_dir / csv_name)
         ),
         "tracker_summary": (
             None

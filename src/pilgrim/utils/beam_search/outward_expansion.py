@@ -85,7 +85,8 @@ def _score_states(
     decoded_states = graph.decode_states(states)
     scores = predictor(decoded_states)
     return (
-        torch.as_tensor(scores, device=graph.device)
+        torch
+        .as_tensor(scores, device=graph.device)
         .reshape(-1)
         .float()
         .nan_to_num(nan=-float("inf"))
@@ -339,9 +340,9 @@ def _collect_step_metadata(
     return {
         "beam_mode_used": beam_mode_used,
         "candidate_pool_size": int(config.candidate_pool_size),
-        "expanded_steps": int(len(frontier_sizes_by_depth)),
+        "expanded_steps": len(frontier_sizes_by_depth),
         "frontier_sizes_by_depth": frontier_sizes_by_depth,
-        "path_layers_stored": int(len(selected_hash_layers)),
+        "path_layers_stored": len(selected_hash_layers),
         "return_paths": bool(config.return_paths),
         "scores_by_depth": scores_by_depth,
         "termination_reason": termination_reason,
@@ -465,9 +466,7 @@ def _run_iterated(
         termination reason.
 
     """
-    history_hash_layers = (
-        [beam_hashes.clone()] if int(config.history_depth) > 0 else []
-    )
+    history_hash_layers = [beam_hashes.clone()] if int(config.history_depth) > 0 else []
 
     n_generators = int(graph.definition.n_generators)
     beam_width_part = max(1, int(math.ceil(int(config.beam_width) / n_generators)))
@@ -649,29 +648,35 @@ def run_outward_expansion(
 
     with torch.inference_mode():
         if beam_mode == "iterated":
-            pool_by_hash, scores_by_depth, frontier_sizes_by_depth, termination_reason = (
-                _run_iterated(
-                    graph=graph,
-                    predictor=normalized_predictor,
-                    config=config,
-                    beam_states=beam_states,
-                    beam_hashes=beam_hashes,
-                    selected_hash_layers=selected_hash_layers,
-                    path_device=path_device,
-                )
+            (
+                pool_by_hash,
+                scores_by_depth,
+                frontier_sizes_by_depth,
+                termination_reason,
+            ) = _run_iterated(
+                graph=graph,
+                predictor=normalized_predictor,
+                config=config,
+                beam_states=beam_states,
+                beam_hashes=beam_hashes,
+                selected_hash_layers=selected_hash_layers,
+                path_device=path_device,
             )
         else:
-            pool_by_hash, scores_by_depth, frontier_sizes_by_depth, termination_reason = (
-                _run_simple_or_advanced(
-                    graph=graph,
-                    predictor=normalized_predictor,
-                    config=config,
-                    beam_mode=beam_mode,
-                    beam_states=beam_states,
-                    beam_hashes=beam_hashes,
-                    selected_hash_layers=selected_hash_layers,
-                    path_device=path_device,
-                )
+            (
+                pool_by_hash,
+                scores_by_depth,
+                frontier_sizes_by_depth,
+                termination_reason,
+            ) = _run_simple_or_advanced(
+                graph=graph,
+                predictor=normalized_predictor,
+                config=config,
+                beam_mode=beam_mode,
+                beam_states=beam_states,
+                beam_hashes=beam_hashes,
+                selected_hash_layers=selected_hash_layers,
+                path_device=path_device,
             )
 
     candidates = _materialize_candidates(

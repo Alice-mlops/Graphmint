@@ -12,6 +12,11 @@ import torch
 from aim import Run
 from torch import nn
 
+from pilgrim.rl.helpers import (
+    greedy_rollout_from_q,
+    model_output_dim,
+    predict_state_scores,
+)
 from pilgrim.rl.policies import greedy_rollout_from_value
 from pilgrim.rl.transitions import central_state_mask
 
@@ -346,12 +351,20 @@ class RLFittedValueIterationAimTracker:
 
         for probe_idx in range(int(self.probe_states.shape[0])):
             state = self.probe_states[probe_idx]
-            path = greedy_rollout_from_value(
-                model,
-                self.graph,
-                state,
-                max_steps=int(self.config.probe_rollout_max_steps),
-            )
+            if int(model_output_dim(model)) == 1:
+                path = greedy_rollout_from_value(
+                    model,
+                    self.graph,
+                    state,
+                    max_steps=int(self.config.probe_rollout_max_steps),
+                )
+            else:
+                path = greedy_rollout_from_q(
+                    model,
+                    self.graph,
+                    state,
+                    max_steps=int(self.config.probe_rollout_max_steps),
+                )
             reached_center = _rollout_reaches_center(self.graph, state, path)
             success_values.append(float(int(reached_center)))
             rollout_lengths.append(float(len(path)))
@@ -554,12 +567,7 @@ def _predict_values(model: nn.Module, states: torch.Tensor) -> torch.Tensor:
         One-dimensional tensor of predictions on CPU.
 
     """
-    batch = _normalize_states(states)
-    device = _model_device(model)
-    model.eval()
-    with torch.no_grad():
-        values = model(batch.to(device).long()).detach().reshape(-1).float()
-    return values.cpu()
+    return predict_state_scores(model, states)
 
 
 def _resolve_primary_loss_payload(payload: Any) -> tuple[str, float]:
@@ -656,23 +664,6 @@ def _predict_scalar_value(model: nn.Module, states: torch.Tensor) -> float:
     """
     values = _predict_values(model, states)
     return float(values[0].item())
-
-
-def _model_device(model: nn.Module) -> torch.device:
-    """
-    Infer the device used by a model.
-
-    Args:
-        model: Model whose device should be inferred.
-
-    Returns:
-        Device of the first parameter, or CPU when the model is parameterless.
-
-    """
-    param = next(model.parameters(), None)
-    if param is None:
-        return torch.device("cpu")
-    return param.device
 
 
 def _rollout_reaches_center(

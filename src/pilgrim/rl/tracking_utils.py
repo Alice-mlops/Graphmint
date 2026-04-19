@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch import nn
 
+from .helpers import greedy_rollout_from_q, model_output_dim, predict_state_scores
 from .policies import greedy_rollout_from_value
 from .transitions import central_state_mask
 
@@ -156,12 +157,7 @@ def predict_values(model: nn.Module, states: torch.Tensor) -> torch.Tensor:
         One-dimensional tensor of predictions on CPU.
 
     """
-    batch = normalize_states(states)
-    device = model_device(model)
-    model.eval()
-    with torch.no_grad():
-        values = model(batch.to(device).long()).detach().reshape(-1).float()
-    return values.cpu()
+    return predict_state_scores(model, states)
 
 
 def predict_scalar_value(model: nn.Module, states: torch.Tensor) -> float:
@@ -318,12 +314,20 @@ def collect_probe_metrics(
 
     for probe_idx in range(int(states.shape[0])):
         state = states[probe_idx]
-        path = greedy_rollout_from_value(
-            model,
-            graph,
-            state,
-            max_steps=int(rollout_max_steps),
-        )
+        if int(model_output_dim(model)) == 1:
+            path = greedy_rollout_from_value(
+                model,
+                graph,
+                state,
+                max_steps=int(rollout_max_steps),
+            )
+        else:
+            path = greedy_rollout_from_q(
+                model,
+                graph,
+                state,
+                max_steps=int(rollout_max_steps),
+            )
         reached_center = rollout_reaches_center(graph, state, path)
         success_values.append(float(int(reached_center)))
         rollout_lengths.append(float(len(path)))

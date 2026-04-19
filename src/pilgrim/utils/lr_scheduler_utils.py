@@ -8,7 +8,8 @@ import torch
 
 
 def step_lr_scheduler(scheduler: Any, metric: float | None = None) -> None:
-    """Advance a learning-rate scheduler by one step.
+    """
+    Advance a learning-rate scheduler by one step.
 
     Args:
         scheduler: Scheduler instance to step. ``None`` is a no-op.
@@ -36,7 +37,8 @@ def lr_scheduler_ctor_from_cfg(
     total_steps_key: str = "num_epochs",
     allow_plateau: bool = True,
 ) -> Callable[[torch.optim.Optimizer], Any] | None:
-    """Build an LR-scheduler constructor from a config mapping.
+    """
+    Build an LR-scheduler constructor from a config mapping.
 
     Args:
         cfg: Config mapping containing ``lr_scheduler`` and a total-step count.
@@ -134,7 +136,9 @@ def lr_scheduler_ctor_from_cfg(
         eta_min_value = spec.get("eta_min", 1e-6)
         eta_min = float(1e-6 if eta_min_value is None else eta_min_value)
         t_max_value = spec.get("t_max", max(1, total_steps - warmup_steps))
-        t_max = int(max(1, total_steps - warmup_steps) if t_max_value is None else t_max_value)
+        t_max = int(
+            max(1, total_steps - warmup_steps) if t_max_value is None else t_max_value
+        )
 
         def _ctor(opt: torch.optim.Optimizer) -> Any:
             warmup = torch.optim.lr_scheduler.LinearLR(

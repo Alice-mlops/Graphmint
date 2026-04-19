@@ -13,9 +13,6 @@ import lightning as L
 import pandas as pd
 import torch
 from cayleypy import CayleyGraph
-from torch import nn
-from tqdm.auto import tqdm
-
 from pilgrim.pancake_competition import (
     BeamInferenceConfig,
     BeamInferenceStats,
@@ -27,6 +24,8 @@ from pilgrim.pancake_competition import (
 from pilgrim.utils.model_io import load_one, save_one
 from pilgrim.utils.pancake_utils import make_graph_for_n, pancake_sort_path, solve
 from pilgrim.utils.reproducibility import set_seed
+from torch import nn
+from tqdm.auto import tqdm
 
 from .aim import AimTrackingCallback, open_aim_run, to_aim_serializable
 from .checkpointing import StateDictCheckpointCallback

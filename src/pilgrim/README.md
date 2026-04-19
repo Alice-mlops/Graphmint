@@ -55,12 +55,16 @@ random-walk neighborhood around each input node and aggregates it with
 cross-attention in `forward()`.
 
 Key idea:
-- For each input state `z`, sample `alice_num_walks` random walks of length
-  `alice_walk_length`, embed all visited states as tokens, then attend from the
-  center embedding to those tokens.
+- For each input state `z`, build a token set from either:
+  - exact 1-hop neighbors plus one self token, or
+  - `alice_num_walks` random walks of length `alice_walk_length`.
+- Embed those tokens, then attend from the center embedding to them.
 
 Important notes:
-- Forward cost scales roughly with `(1 + alice_num_walks * alice_walk_length)`.
+- In `alice_token_source="random_walk"` mode, forward cost scales roughly with
+  `(1 + alice_num_walks * alice_walk_length)`.
+- In `alice_token_source="one_hop"` mode, forward cost scales roughly with
+  `(1 + n_selected_generators)`.
 - If you also enable the Lipschitz expansion regularizer, training can become
   much more expensive because the regularizer calls the model many times.
 
@@ -73,6 +77,7 @@ graph = make_graph_for_n(n)
 
 CFG.update(
     generator_moves=graph.definition.generators_permutations,
+    alice_token_source="random_walk",
     alice_num_walks=8,
     alice_walk_length=5,
     alice_attention_heads=4,

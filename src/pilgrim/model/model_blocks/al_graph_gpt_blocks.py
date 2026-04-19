@@ -91,6 +91,69 @@ def make_activation(name: str) -> nn.Module:
     raise ValueError(f"Unknown algraphgpt_activation: {name}")
 
 
+class AlGraphGPTReadoutHead(nn.Module):
+    """Linear readout head for scalar-value and vector-Q prediction."""
+
+    def __init__(self, hidden_dim: int, output_dim: int) -> None:
+        """
+        Initialize the readout head.
+
+        Args:
+            hidden_dim: Size of the center embedding.
+            output_dim: Number of output channels.
+
+        Raises:
+            ValueError: If ``output_dim`` is not positive.
+
+        """
+        super().__init__()
+        if int(output_dim) <= 0:
+            raise ValueError("output_dim must be positive.")
+        self.output_dim = int(output_dim)
+        self.proj = nn.Linear(int(hidden_dim), int(output_dim))
+
+    def forward(self, center: torch.Tensor) -> torch.Tensor:
+        """
+        Project center embeddings into the configured output space.
+
+        Args:
+            center: Center embeddings with shape ``(batch, hidden_dim)``.
+
+        Returns:
+            Tensor with shape ``(batch,)`` when ``output_dim == 1`` and
+            ``(batch, output_dim)`` otherwise.
+
+        """
+        out = self.proj(center)
+        if self.output_dim == 1:
+            return out.flatten()
+        return out
+
+
+def run_readout_heads(
+    center: torch.Tensor,
+    *,
+    primary_head: AlGraphGPTReadoutHead,
+    auxiliary_head: AlGraphGPTReadoutHead | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """
+    Apply one or two readout heads to the shared center embedding.
+
+    Args:
+        center: Center embeddings with shape ``(batch, hidden_dim)``.
+        primary_head: Mandatory primary prediction head.
+        auxiliary_head: Optional auxiliary prediction head.
+
+    Returns:
+        Tuple ``(primary, auxiliary)`` where ``auxiliary`` is ``None`` when
+        no auxiliary head is provided.
+
+    """
+    primary = primary_head(center)
+    auxiliary = None if auxiliary_head is None else auxiliary_head(center)
+    return primary, auxiliary
+
+
 class AlGraphGPTLayer(nn.Module):
     """One center-query block: cross-attention branch + FFN branch."""
 

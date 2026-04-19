@@ -11,6 +11,7 @@ stack and its variants:
 
 from __future__ import annotations
 
+from .al_graph_gpt_blocks import AlGraphGPTReadoutHead
 from .keel_residuals import (
     KeelResidualBlock,
     PostLNAlphaBetaResidualBlock,
@@ -20,6 +21,7 @@ from .node_encoders import build_node_encoder
 from .residuals import ResidualBlock
 
 __all__ = [
+    "AlGraphGPTReadoutHead",
     "KeelResidualBlock",
     "PostLNAlphaBetaResidualBlock",
     "PostLNAlphaResidualBlock",

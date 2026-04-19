@@ -5,10 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from torch import nn
-
 from pilgrim.model import AlGraphGPT, AliceInCayleyland, AlkeelGrim, AlPilgrim, Pilgrim
 from pilgrim.schemas import AlGraphGPTConfig
+from torch import nn
 
 _MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "Pilgrim": Pilgrim,

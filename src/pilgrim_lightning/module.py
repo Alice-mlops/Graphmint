@@ -7,10 +7,9 @@ from typing import Any
 import lightning as L
 import torch
 from cayleypy import CayleyGraph
-from torch import nn
-
 from pilgrim.utils.losses import lipschitz_expansion_loss
 from pilgrim.utils.training_utils import lr_scheduler_ctor_from_cfg
+from torch import nn
 
 from .config import LipschitzConfig, OptimizationConfig
 

@@ -23,10 +23,14 @@ from .rl import (
     MultiStepTDValueLossState,
     MultiStepTDValueMetrics,
     MultiStepTDValueStepDiagnostics,
-    TDSecondaryGpuEvalConfig,
+    SearchGuidedPPOConfig,
+    SearchGuidedPPOLossState,
+    SearchGuidedPPOMetrics,
+    SearchGuidedPPOStepDiagnostics,
     TDLipschitzPenaltyConfig,
     TDRandomWalkSamplingConfig,
     TDReplayBufferConfig,
+    TDSecondaryGpuEvalConfig,
 )
 
 __all__ = [
@@ -48,8 +52,12 @@ __all__ = [
     "OutwardExpansionConfig",
     "OutwardExpansionResult",
     "SearchEvalConfig",
-    "TDSecondaryGpuEvalConfig",
+    "SearchGuidedPPOConfig",
+    "SearchGuidedPPOLossState",
+    "SearchGuidedPPOMetrics",
+    "SearchGuidedPPOStepDiagnostics",
     "TDLipschitzPenaltyConfig",
     "TDRandomWalkSamplingConfig",
     "TDReplayBufferConfig",
+    "TDSecondaryGpuEvalConfig",
 ]

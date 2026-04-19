@@ -67,15 +67,9 @@ class BenchmarkItem(BaseModel):
             raise ValueError("benchmark states must be non-empty.")
         if self.label_type == LabelType.EXACT and self.exact_distance is None:
             raise ValueError("label_type='exact' requires exact_distance.")
-        if (
-            self.label_type == LabelType.BEST_KNOWN
-            and self.best_known_length is None
-        ):
+        if self.label_type == LabelType.BEST_KNOWN and self.best_known_length is None:
             raise ValueError("label_type='best_known' requires best_known_length.")
-        if (
-            self.label_type == LabelType.BASELINE_ONLY
-            and self.baseline_length is None
-        ):
+        if self.label_type == LabelType.BASELINE_ONLY and self.baseline_length is None:
             raise ValueError("label_type='baseline_only' requires baseline_length.")
         return self
 

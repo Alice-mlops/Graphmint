@@ -9,10 +9,9 @@ import lightning as L
 import numpy as np
 import torch
 from cayleypy import CayleyGraph
+from pilgrim.utils.graph_utils import subsample_xy
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
-
-from pilgrim.utils.graph_utils import subsample_xy
 
 from .config import RandomWalkDataConfig
 

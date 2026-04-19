@@ -671,9 +671,7 @@ class FittedValueIterationTrainer:
                             unique_states[selected_indices],
                             unique_hashes[selected_indices],
                             candidate_scores[selected_indices],
-                            score_ema_decay=float(
-                                self.config.frontier.score_ema_decay
-                            ),
+                            score_ema_decay=float(self.config.frontier.score_ema_decay),
                         )
                         stats = self._apply_frontier_update_stats(
                             stats=stats,
