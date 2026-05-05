@@ -194,7 +194,11 @@ class TDFileMetricsTracker:
         """
         should_log_step = diagnostics.step % int(self.config.step_log_interval) == 0
         should_log_probe = self._should_log_probes(diagnostics.step)
-        if not should_log_step and not should_log_probe:
+        should_print_step = (
+            bool(self.config.print_metrics)
+            and diagnostics.step % self._terminal_log_interval() == 0
+        )
+        if not should_log_step and not should_log_probe and not should_print_step:
             return
 
         metrics = self._build_metrics(
@@ -202,14 +206,15 @@ class TDFileMetricsTracker:
             diagnostics=diagnostics,
             include_probes=should_log_probe,
         )
-        if self._jsonl_handle is not None:
+        should_write = should_log_step or should_log_probe
+        if should_write and self._jsonl_handle is not None:
             self._jsonl_handle.write(json.dumps(metrics, sort_keys=True) + "\n")
             self._jsonl_handle.flush()
-        if self._csv_writer is not None:
+        if should_write and self._csv_writer is not None:
             self._csv_writer.writerow(metrics)
             assert self._csv_handle is not None
             self._csv_handle.flush()
-        if self.config.print_metrics:
+        if should_print_step:
             print(self._format_log_line(metrics))
 
     def on_fit_end(
@@ -270,6 +275,21 @@ class TDFileMetricsTracker:
         if int(self.config.probe.eval_interval) <= 0:
             return False
         return step % int(self.config.probe.eval_interval) == 0
+
+    def _terminal_log_interval(self) -> int:
+        """
+        Return the terminal-print interval for compact RL summaries.
+
+        Returns:
+            Positive optimizer-step interval. When
+            ``config.terminal_log_interval`` is unset, this falls back to the
+            file snapshot interval to preserve previous tracker behavior.
+
+        """
+        interval = self.config.terminal_log_interval
+        if interval is None:
+            return int(self.config.step_log_interval)
+        return int(interval)
 
     def _build_metrics(
         self,

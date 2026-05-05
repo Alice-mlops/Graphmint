@@ -33,6 +33,8 @@ class TDFileTrackerConfig(BaseModel):
     Args:
         output_dir: Directory where tracker artifacts will be written.
         step_log_interval: Number of optimizer steps between metric snapshots.
+        terminal_log_interval: Number of optimizer steps between terminal
+            summaries. Defaults to ``step_log_interval`` when unset.
         write_jsonl: Whether to append a full JSONL metric stream.
         write_csv: Whether to write a compact CSV summary.
         print_metrics: Whether to print short human-readable step summaries.
@@ -48,6 +50,7 @@ class TDFileTrackerConfig(BaseModel):
 
     output_dir: Path
     step_log_interval: int = Field(10, ge=1)
+    terminal_log_interval: int | None = Field(default=None, ge=1)
     write_jsonl: bool = True
     write_csv: bool = True
     print_metrics: bool = True
