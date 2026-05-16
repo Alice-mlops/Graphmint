@@ -13,7 +13,10 @@ from pilgrim.rl import (
     compute_sampled_td_lambda_value_targets,
     compute_td_lambda_value_targets,
 )
-from pilgrim.rl.transitions import compute_configured_value_targets
+from pilgrim.rl.transitions import (
+    _enumerate_sampled_neighbor_states,
+    compute_configured_value_targets,
+)
 from pilgrim.schemas.rl import MultiStepTDValueConfig, TDTargetSamplingConfig
 
 
@@ -127,6 +130,53 @@ def test_sampled_targets_are_deterministic_for_same_sample_index() -> None:
     assert first.shape == (3,)
     assert torch.isfinite(first).all()
     torch.testing.assert_close(first, second)
+
+
+def test_sampled_neighbor_enumeration_vectorized_matches_fixed_generator_apply() -> None:
+    """Per-row sampled permutation neighbors should match CayleyPy application."""
+    graph = _test_graph()
+    states = torch.tensor(
+        [
+            [0, 1, 2, 3],
+            [3, 2, 1, 0],
+            [2, 0, 3, 1],
+            [1, 3, 0, 2],
+        ],
+        dtype=torch.long,
+    )
+    generator = torch.Generator()
+    generator.manual_seed(20260516)
+
+    neighbors, sampled_generators = _enumerate_sampled_neighbor_states(
+        graph,
+        states,
+        generator_indices=None,
+        action_sample_size=2,
+        generator=generator,
+    )
+
+    expected = torch.empty_like(neighbors)
+    for sample_position in range(sampled_generators.shape[1]):
+        column_generators = sampled_generators[:, sample_position]
+        for generator_index in torch.unique(column_generators).tolist():
+            rows = torch.nonzero(
+                column_generators == int(generator_index),
+                as_tuple=False,
+            ).reshape(-1)
+            dst = torch.empty(
+                (rows.numel(), states.shape[1]),
+                dtype=states.dtype,
+                device=states.device,
+            )
+            graph.apply_generator_batched(
+                int(generator_index),
+                states.index_select(0, rows),
+                dst,
+            )
+            expected[rows, sample_position, :] = dst
+
+    assert neighbors.shape == (states.shape[0], 2, states.shape[1])
+    torch.testing.assert_close(neighbors, expected)
 
 
 def test_multistep_td_config_accepts_target_sampling() -> None:

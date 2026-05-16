@@ -1074,6 +1074,14 @@ def _enumerate_sampled_neighbor_states(
         sample_size=int(action_sample_size),
         generator=generator,
     )
+    vectorized_neighbors = _try_apply_sampled_permutation_neighbors(
+        graph=graph,
+        states=source_states,
+        sampled_generators=sampled_generators,
+    )
+    if vectorized_neighbors is not None:
+        return vectorized_neighbors, sampled_generators
+
     neighbors = torch.empty(
         (
             source_states.shape[0],
@@ -1103,6 +1111,39 @@ def _enumerate_sampled_neighbor_states(
             )
             neighbors[rows, sample_position, :] = dst
     return neighbors, sampled_generators
+
+
+def _try_apply_sampled_permutation_neighbors(
+    *,
+    graph: CayleyGraph,
+    states: torch.Tensor,
+    sampled_generators: torch.Tensor,
+) -> torch.Tensor | None:
+    """
+    Apply per-row sampled permutation generators with one vectorized gather.
+
+    CayleyGraph.apply_generator_batched handles one fixed generator for a whole
+    batch. Sampled backups instead have a generator table of shape
+    ``(batch, sampled_actions)``. For unencoded permutation graphs this fast
+    path gathers all sampled neighbors at once.
+    """
+    if not graph.definition.is_permutation_group():
+        return None
+    if getattr(graph, "string_encoder", None) is not None:
+        return None
+    permutations = getattr(graph, "permutations_torch", None)
+    if permutations is None:
+        return None
+
+    batch_size, sample_size = sampled_generators.shape
+    state_size = states.shape[1]
+    moves = permutations.index_select(0, sampled_generators.reshape(-1)).view(
+        int(batch_size),
+        int(sample_size),
+        int(state_size),
+    )
+    expanded_states = states.unsqueeze(1).expand(-1, int(sample_size), -1)
+    return torch.gather(expanded_states, dim=2, index=moves)
 
 
 def _sample_generator_table(
