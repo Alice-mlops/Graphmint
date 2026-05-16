@@ -30,12 +30,28 @@ class AlGraphGPTConfig(BaseModel):
         "lehmer",
         "lehmer-breakpoints",
         "megaminx",
+        "puzzle_emb",
     ] = "onehot_linear"
     embedding_dim: int | None = Field(default=None, ge=1)
     megaminx_embedding_dim: int | None = Field(default=None, ge=1)
     megaminx_num_faces: int = Field(12, ge=1)
     megaminx_use_inverse: bool = True
     megaminx_use_graph_breakpoints: bool = True
+    puzzle_embedding_dim: int | None = Field(default=None, ge=1)
+    puzzle_num_faces: int = Field(12, ge=1)
+    puzzle_use_site_embeddings: bool = True
+    puzzle_use_inverse: bool = True
+    puzzle_use_face_features: bool = True
+    puzzle_use_piece_features: bool = True
+    puzzle_use_orientation_features: bool = True
+    puzzle_use_graph_breakpoints: bool = True
+    puzzle_use_sorted_face_counts: bool = True
+    puzzle_use_move_delta_features: bool = False
+    puzzle_use_move_cycle_features: bool = False
+    puzzle_use_face_solvedness_features: bool = False
+    puzzle_piece_groups: Sequence[Sequence[int]] | None = None
+    puzzle_corner_group_size: int = Field(3, ge=1)
+    puzzle_edge_group_size: int = Field(2, ge=1)
 
     # Transformer settings.
     algraphgpt_d_model: int = Field(..., ge=1)
@@ -98,6 +114,26 @@ class AlGraphGPTConfig(BaseModel):
             raise ValueError(
                 "state_size must be divisible by megaminx_num_faces when "
                 "input_encoder_type='megaminx'."
+            )
+
+        if (
+            self.input_encoder is None
+            and self.input_encoder_type == "puzzle_emb"
+            and self.state_size % self.puzzle_num_faces != 0
+        ):
+            raise ValueError(
+                "state_size must be divisible by puzzle_num_faces when "
+                "input_encoder_type='puzzle_emb'."
+            )
+
+        if (
+            self.input_encoder is None
+            and self.input_encoder_type == "puzzle_emb"
+            and self.num_classes < self.state_size
+        ):
+            raise ValueError(
+                "puzzle_emb expects unique sticker ids and requires "
+                "num_classes >= state_size."
             )
 
         if self.alice_token_source == "one_hop" and self.generator_moves is None:
