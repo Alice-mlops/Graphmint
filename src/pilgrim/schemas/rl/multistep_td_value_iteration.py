@@ -83,6 +83,37 @@ class TDLipschitzPenaltyConfig(BaseModel):
     reduction: str = "mean"
 
 
+class TDTargetSamplingConfig(BaseModel):
+    """
+    Optional sampled-backup settings for multi-step TD target construction.
+
+    Args:
+        enabled: Whether to replace exact full-action target backups with
+            sampled backups.
+        action_sample_size: Number of actions sampled at each non-root expanded
+            state. ``None`` keeps exact all-action expansion below the root.
+        root_action_sample_size: Number of actions sampled at the replay batch
+            root states. ``None`` keeps exact all-action root expansion, which
+            is often worthwhile when the generator count is small.
+        action_sample_repeats: Number of independent sampled backup trees whose
+            targets are averaged.
+        horizon_sample_size: Optional number of TD-lambda horizons sampled from
+            the truncated lambda weights. ``None`` keeps the exact lambda
+            mixture over all horizons.
+        seed: Base random seed used by deterministic sampled target builders.
+
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    enabled: bool = False
+    action_sample_size: int | None = Field(default=None, ge=1)
+    root_action_sample_size: int | None = Field(default=None, ge=1)
+    action_sample_repeats: int = Field(1, ge=1)
+    horizon_sample_size: int | None = Field(default=None, ge=1)
+    seed: int = 42
+
+
 class TDLearningRateSchedulerConfig(BaseModel):
     """
     Step-based learning-rate scheduler settings for multi-step TD training.
@@ -234,6 +265,7 @@ class MultiStepTDValueConfig(BaseModel):
         sampling: Random-walk replay-sampling configuration.
         frontier: Optional frontier-archive configuration.
         lipschitz: Optional Lipschitz-penalty configuration.
+        target_sampling: Optional sampled-backup target-construction settings.
         parallel: GPU parallelization settings.
 
     Raises:
@@ -271,6 +303,9 @@ class MultiStepTDValueConfig(BaseModel):
     frontier: TDFrontierArchiveConfig = Field(default_factory=TDFrontierArchiveConfig)
     lipschitz: TDLipschitzPenaltyConfig = Field(
         default_factory=TDLipschitzPenaltyConfig
+    )
+    target_sampling: TDTargetSamplingConfig = Field(
+        default_factory=TDTargetSamplingConfig
     )
     parallel: TDParallelConfig = Field(default_factory=TDParallelConfig)
 
@@ -388,6 +423,18 @@ class MultiStepTDValueConfig(BaseModel):
             "lipschitz.seed": self.lipschitz.seed,
             "lipschitz.state_batch_size": self.lipschitz.state_batch_size,
             "lipschitz.reduction": str(self.lipschitz.reduction),
+            "target_sampling.enabled": bool(self.target_sampling.enabled),
+            "target_sampling.action_sample_size": self.target_sampling.action_sample_size,
+            "target_sampling.root_action_sample_size": (
+                self.target_sampling.root_action_sample_size
+            ),
+            "target_sampling.action_sample_repeats": int(
+                self.target_sampling.action_sample_repeats
+            ),
+            "target_sampling.horizon_sample_size": (
+                self.target_sampling.horizon_sample_size
+            ),
+            "target_sampling.seed": int(self.target_sampling.seed),
             "parallel.mode": str(self.parallel.resolved_mode),
             "parallel.num_gpus": int(self.parallel.num_gpus),
             "parallel.backend": str(self.parallel.backend),

@@ -31,6 +31,7 @@ from .rl import (
     TDRandomWalkSamplingConfig,
     TDReplayBufferConfig,
     TDSecondaryGpuEvalConfig,
+    TDTargetSamplingConfig,
 )
 
 __all__ = [
@@ -60,4 +61,5 @@ __all__ = [
     "TDRandomWalkSamplingConfig",
     "TDReplayBufferConfig",
     "TDSecondaryGpuEvalConfig",
+    "TDTargetSamplingConfig",
 ]

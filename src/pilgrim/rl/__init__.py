@@ -32,6 +32,7 @@ from ..schemas.rl import (
     TDRandomWalkSamplingConfig,
     TDReplayBufferConfig,
     TDSecondaryGpuEvalConfig,
+    TDTargetSamplingConfig,
 )
 from .composite_tracking import CompositeMultiStepTDValueTracker
 from .config import (
@@ -115,10 +116,14 @@ from .supervision_archive import (
     subsample_policy_supervision_batch,
 )
 from .transitions import (
+    SampledBackupConfig,
     combine_truncated_td_lambda_targets,
     compute_bellman_value_targets,
     compute_n_step_value_target_sequence,
     compute_n_step_value_targets,
+    compute_sampled_n_step_value_target_sequence,
+    compute_sampled_n_step_value_targets,
+    compute_sampled_td_lambda_value_targets,
     compute_td_lambda_value_targets,
     enumerate_neighbor_states,
 )
@@ -158,6 +163,7 @@ __all__ = [
     "RandomWalkSamplingConfig",
     "ReplayBufferConfig",
     "ReverseTrajectorySupervisionBatch",
+    "SampledBackupConfig",
     "SearchGuidedPPOAuxLossConfig",
     "SearchGuidedPPOBeamSearchConfig",
     "SearchGuidedPPOConfig",
@@ -180,6 +186,7 @@ __all__ = [
     "TDRandomWalkSamplingConfig",
     "TDReplayBufferConfig",
     "TDSecondaryGpuEvalConfig",
+    "TDTargetSamplingConfig",
     "TensorReplayBuffer",
     "TransitionBatch",
     "TransitionReplayBuffer",
@@ -193,6 +200,9 @@ __all__ = [
     "compute_n_step_double_q_targets",
     "compute_n_step_value_target_sequence",
     "compute_n_step_value_targets",
+    "compute_sampled_n_step_value_target_sequence",
+    "compute_sampled_n_step_value_targets",
+    "compute_sampled_td_lambda_value_targets",
     "compute_supervised_policy_value_losses",
     "compute_td_lambda_value_targets",
     "concatenate_policy_supervision_batches",

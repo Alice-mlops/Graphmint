@@ -21,6 +21,7 @@ from .multistep_td_value_iteration import (
     TDLipschitzPenaltyConfig,
     TDRandomWalkSamplingConfig,
     TDReplayBufferConfig,
+    TDTargetSamplingConfig,
 )
 from .parallel import TDParallelConfig, TDSecondaryGpuEvalConfig
 from .search_guided_ppo import (
@@ -65,4 +66,5 @@ __all__ = [
     "TDRandomWalkSamplingConfig",
     "TDReplayBufferConfig",
     "TDSecondaryGpuEvalConfig",
+    "TDTargetSamplingConfig",
 ]

@@ -13,7 +13,7 @@ import torch
 from torch import nn
 
 from .distributed import cpu_model_state_dict
-from .transitions import compute_configured_value_targets
+from .transitions import SampledBackupConfig, compute_configured_value_targets
 
 if TYPE_CHECKING:
     from cayleypy import CayleyGraph
@@ -36,6 +36,7 @@ class TDTargetEvaluationSettings:
         terminal_value: Value assigned to the center state.
         generator_indices: Optional subset of generators used in targets.
         value_batch_size: Optional chunk size for frozen-model evaluation.
+        sampled_backup: Optional sampled-backup settings.
 
     """
 
@@ -46,6 +47,7 @@ class TDTargetEvaluationSettings:
     terminal_value: float
     generator_indices: tuple[int, ...] | None
     value_batch_size: int | None
+    sampled_backup: SampledBackupConfig
 
     @classmethod
     def from_config(
@@ -77,6 +79,18 @@ class TDTargetEvaluationSettings:
                 None
                 if config.value_batch_size is None
                 else int(config.value_batch_size)
+            ),
+            sampled_backup=SampledBackupConfig(
+                enabled=bool(config.target_sampling.enabled),
+                action_sample_size=config.target_sampling.action_sample_size,
+                root_action_sample_size=(
+                    config.target_sampling.root_action_sample_size
+                ),
+                action_sample_repeats=int(
+                    config.target_sampling.action_sample_repeats
+                ),
+                horizon_sample_size=config.target_sampling.horizon_sample_size,
+                seed=int(config.target_sampling.seed),
             ),
         )
 
@@ -122,6 +136,7 @@ class LocalTDTargetEvaluationBackend:
         self.target_model = target_model
         self.graph = graph
         self.settings = settings
+        self._sample_index = 0
 
     def compute_targets(self, states: torch.Tensor) -> torch.Tensor:
         """
@@ -134,6 +149,7 @@ class LocalTDTargetEvaluationBackend:
             One-dimensional TD target tensor on the learner device.
 
         """
+        sample_index = self._next_sample_index()
         return compute_configured_value_targets(
             target_model=self.target_model,
             graph=self.graph,
@@ -145,6 +161,8 @@ class LocalTDTargetEvaluationBackend:
             terminal_value=self.settings.terminal_value,
             generator_indices=self.settings.generator_indices,
             value_batch_size=self.settings.value_batch_size,
+            sampled_backup=self.settings.sampled_backup,
+            sample_index=sample_index,
         )
 
     def sync_target_model(self, target_model: nn.Module) -> None:
@@ -153,6 +171,12 @@ class LocalTDTargetEvaluationBackend:
 
     def close(self) -> None:
         """Release no-op local backend resources."""
+
+    def _next_sample_index(self) -> int:
+        """Return and advance the deterministic target-sampling call index."""
+        sample_index = int(self._sample_index)
+        self._sample_index += 1
+        return sample_index
 
 
 @dataclass(slots=True)
@@ -175,6 +199,8 @@ class _EvaluatorReplica:
         self,
         states: torch.Tensor,
         settings: TDTargetEvaluationSettings,
+        *,
+        sample_index: int,
     ) -> torch.Tensor:
         """
         Compute TD targets for a shard of states on the replica device.
@@ -182,6 +208,7 @@ class _EvaluatorReplica:
         Args:
             states: Input state rows.
             settings: Immutable target-construction settings.
+            sample_index: Target-sampling call index for this shard.
 
         Returns:
             One-dimensional tensor of TD targets on ``self.device``.
@@ -199,6 +226,8 @@ class _EvaluatorReplica:
             terminal_value=settings.terminal_value,
             generator_indices=settings.generator_indices,
             value_batch_size=settings.value_batch_size,
+            sampled_backup=settings.sampled_backup,
+            sample_index=int(sample_index),
         )
 
     def sync_target_model(self, state_dict: dict[str, torch.Tensor]) -> None:
@@ -257,6 +286,7 @@ class SecondaryGpuTDTargetEvaluationBackend:
             num_gpus=int(num_gpus),
         )
         self._executor = ThreadPoolExecutor(max_workers=len(self._replicas))
+        self._sample_index = 0
 
     def compute_targets(self, states: torch.Tensor) -> torch.Tensor:
         """
@@ -272,18 +302,32 @@ class SecondaryGpuTDTargetEvaluationBackend:
         data = _normalize_state_rows(states)
         if data.shape[0] == 0:
             return torch.empty((0,), dtype=torch.float32, device=data.device)
+        sample_index = self._next_sample_index()
         if len(self._replicas) == 1:
             return (
-                self._replicas[0].compute_targets(data, self.settings).to(data.device)
+                self._replicas[0]
+                .compute_targets(
+                    data,
+                    self.settings,
+                    sample_index=sample_index,
+                )
+                .to(data.device)
             )
 
         shards = _split_state_rows(data, num_shards=len(self._replicas))
         futures = []
-        for replica, shard in zip(self._replicas, shards, strict=True):
+        for shard_index, (replica, shard) in enumerate(
+            zip(self._replicas, shards, strict=True)
+        ):
             if shard.shape[0] == 0:
                 continue
             futures.append(
-                self._executor.submit(replica.compute_targets, shard, self.settings)
+                self._executor.submit(
+                    replica.compute_targets,
+                    shard,
+                    self.settings,
+                    sample_index=sample_index + shard_index,
+                )
             )
 
         outputs = [future.result() for future in futures]
@@ -311,6 +355,12 @@ class SecondaryGpuTDTargetEvaluationBackend:
         """Best-effort cleanup for the evaluator thread pool."""
         with contextlib.suppress(Exception):
             self.close()
+
+    def _next_sample_index(self) -> int:
+        """Return and advance the deterministic target-sampling call index."""
+        sample_index = int(self._sample_index)
+        self._sample_index += 1
+        return sample_index
 
     @staticmethod
     def _build_replicas(
