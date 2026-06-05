@@ -5,7 +5,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from pilgrim.model import AlGraphGPT, AliceInCayleyland, AlkeelGrim, AlPilgrim, Pilgrim
+from pilgrim.model import (
+    AlGraphGPT,
+    AliceInCayleyland,
+    AlkeelGrim,
+    AlPilgrim,
+    PancakeActionScorer,
+    Pilgrim,
+)
 from pilgrim.schemas import AlGraphGPTConfig
 from torch import nn
 
@@ -14,6 +21,7 @@ _MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "AlPilgrim": AlPilgrim,
     "AlkeelGrim": AlkeelGrim,
     "AliceInCayleyland": AliceInCayleyland,
+    "PancakeActionScorer": PancakeActionScorer,
 }
 
 
@@ -37,6 +45,8 @@ def build_model(model_name: str, model_config: Mapping[str, Any]) -> nn.Module:
         if not isinstance(cfg, AlGraphGPTConfig):
             cfg = AlGraphGPTConfig(**dict(model_config))
         return AlGraphGPT(cfg)
+    if model_name == "PancakeActionScorer":
+        return PancakeActionScorer(**dict(model_config))
 
     model_cls = _MODEL_REGISTRY.get(model_name)
     if model_cls is None:

@@ -4,6 +4,14 @@ from .al_graph_gpt import AlGraphGPT
 from .al_pilgrim import AlPilgrim
 from .alice_in_cayleyland import AliceInCayleyland
 from .alkeelgrim import AlkeelGrim
+from .pancake_action_scorer import PancakeActionScorer
 from .pilgrim import Pilgrim
 
-__all__ = ["AlGraphGPT", "AlPilgrim", "AliceInCayleyland", "AlkeelGrim", "Pilgrim"]
+__all__ = [
+    "AlGraphGPT",
+    "AlPilgrim",
+    "AliceInCayleyland",
+    "AlkeelGrim",
+    "PancakeActionScorer",
+    "Pilgrim",
+]
