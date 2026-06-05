@@ -28,6 +28,89 @@ def _tiny_model() -> PancakeActionScorer:
     )
 
 
+def _slow_action_features(
+    model: PancakeActionScorer,
+    states: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Build action features by explicit prefix flips.
+
+    Args:
+        model: Scorer that provides the breakpoint helper and dtype.
+        states: State batch shaped ``(batch, n)``.
+
+    Returns:
+        Reference action feature tensor shaped ``(batch, n - 1, 9)``.
+
+    """
+    batch = states.long()
+    batch_size, n = int(batch.shape[0]), int(batch.shape[1])
+    denom = float(max(n - 1, 1))
+    current_breakpoints = _breakpoint_counts(batch)
+    current_fraction = current_breakpoints / float(n + 1)
+    first_value = batch[:, 0].to(torch.float32) / denom
+    rows: list[torch.Tensor] = []
+    for k in range(2, n + 1):
+        next_states = batch.clone()
+        next_states[:, :k] = torch.flip(batch[:, :k], dims=[1])
+        next_breakpoints = _breakpoint_counts(next_states)
+        kth_value = batch[:, k - 1].to(torch.float32) / denom
+        if k < n:
+            after_value = batch[:, k].to(torch.float32) / denom
+        else:
+            after_value = torch.ones(batch_size, device=batch.device)
+        row = torch.stack(
+            [
+                torch.full((batch_size,), float(k) / float(n), device=batch.device),
+                torch.full((batch_size,), float(k - 1) / denom, device=batch.device),
+                torch.full((batch_size,), float(k == n), device=batch.device),
+                first_value,
+                kth_value,
+                after_value,
+                current_fraction.squeeze(1),
+                ((next_breakpoints - current_breakpoints) / float(n + 1)).squeeze(1),
+                (next_breakpoints / float(n + 1)).squeeze(1),
+            ],
+            dim=1,
+        )
+        rows.append(row)
+    return torch.stack(rows, dim=1).to(model.model_dtype)
+
+
+def _breakpoint_counts(states: torch.Tensor) -> torch.Tensor:
+    """
+    Count pancake breakpoints for each row.
+
+    Args:
+        states: State batch shaped ``(batch, n)``.
+
+    Returns:
+        Breakpoint counts shaped ``(batch, 1)``.
+
+    """
+    batch_size, n = int(states.shape[0]), int(states.shape[1])
+    shifted = states.long() + 1
+    extended = torch.empty(
+        (batch_size, n + 2),
+        device=states.device,
+        dtype=torch.long,
+    )
+    extended[:, 0] = 0
+    extended[:, 1:-1] = shifted
+    extended[:, -1] = n + 1
+    return (
+        extended[:, 1:]
+        .sub(extended[:, :-1])
+        .abs()
+        .ne(1)
+        .to(torch.float32)
+        .sum(
+            dim=1,
+            keepdim=True,
+        )
+    )
+
+
 def test_forward_width_tracks_pancake_size() -> None:
     """One model instance should produce ``n - 1`` action logits for each n."""
     model = _tiny_model().eval()
@@ -43,6 +126,24 @@ def test_forward_width_tracks_pancake_size() -> None:
     assert logits8.shape == (1, 7)
     assert torch.isfinite(logits5).all()
     assert torch.isfinite(logits8).all()
+
+
+def test_vectorized_action_features_match_explicit_prefix_flips() -> None:
+    """Vectorized action features should match the slow flip/recount formula."""
+    model = _tiny_model().eval()
+    states = torch.tensor(
+        [
+            [0, 1, 2, 3, 4, 5],
+            [3, 1, 2, 0, 5, 4],
+            [5, 0, 2, 1, 3, 4],
+        ],
+        dtype=torch.long,
+    )
+
+    actual = model.build_action_features(states)
+    expected = _slow_action_features(model, states)
+
+    assert torch.allclose(actual, expected)
 
 
 def test_forward_readouts_support_supervised_policy_value_loss() -> None:

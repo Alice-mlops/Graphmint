@@ -301,7 +301,7 @@ class PancakeActionScorer(nn.Module):
         )
         return token_features, global_features
 
-    def build_action_features(self, states: torch.Tensor) -> torch.Tensor:
+    def build_action_features(self, states: torch.Tensor) -> torch.Tensor:  # noqa: PLR0914
         """
         Build action-local features for every legal prefix reversal.
 
@@ -315,45 +315,83 @@ class PancakeActionScorer(nn.Module):
         batch = self._validate_states(states)
         batch_size, n = int(batch.shape[0]), int(batch.shape[1])
         denom = float(max(n - 1, 1))
-        current_breakpoints = self._breakpoint_bits_and_deltas(batch)[0].sum(
-            dim=1,
-            keepdim=True,
+        shifted = batch.long() + 1
+        extended = torch.empty(
+            (batch_size, n + 2),
+            device=batch.device,
+            dtype=torch.long,
         )
+        extended[:, 0] = 0
+        extended[:, 1:-1] = shifted
+        extended[:, -1] = n + 1
+        old_breaks = extended[:, 1:].sub(extended[:, :-1]).abs().ne(1).to(torch.float32)
+        current_breakpoints = old_breaks.sum(dim=1, keepdim=True)
         current_fraction = current_breakpoints / float(n + 1)
-        first_value = batch[:, 0].to(torch.float32) / denom
-        rows: list[torch.Tensor] = []
-        for k in range(2, n + 1):
-            next_states = batch.clone()
-            next_states[:, :k] = torch.flip(batch[:, :k], dims=[1])
-            next_breakpoints = self._breakpoint_bits_and_deltas(next_states)[0].sum(
-                dim=1,
-                keepdim=True,
-            )
-            kth_value = batch[:, k - 1].to(torch.float32) / denom
-            if k < n:
-                after_value = batch[:, k].to(torch.float32) / denom
-            else:
-                after_value = torch.ones(batch_size, device=batch.device)
-            row = torch.stack(
-                [
-                    torch.full((batch_size,), float(k) / float(n), device=batch.device),
-                    torch.full(
-                        (batch_size,), float(k - 1) / denom, device=batch.device
-                    ),
-                    torch.full((batch_size,), float(k == n), device=batch.device),
-                    first_value,
-                    kth_value,
-                    after_value,
-                    current_fraction.squeeze(1),
-                    ((next_breakpoints - current_breakpoints) / float(n + 1)).squeeze(
-                        1
-                    ),
-                    (next_breakpoints / float(n + 1)).squeeze(1),
-                ],
-                dim=1,
-            )
-            rows.append(row)
-        return torch.stack(rows, dim=1).to(self.model_dtype)
+        action_lengths = torch.arange(2, n + 1, device=batch.device, dtype=torch.long)
+        action_count = int(action_lengths.shape[0])
+
+        kth_shifted = shifted.index_select(1, action_lengths - 1)
+        old_left_break = old_breaks[:, :1]
+        old_right_break = old_breaks.index_select(1, action_lengths)
+        new_left_break = kth_shifted.ne(1).to(torch.float32)
+
+        first_shifted = shifted[:, :1].expand(-1, action_count)
+        after_shifted = torch.cat(
+            [
+                shifted[:, 2:],
+                torch.full(
+                    (batch_size, 1),
+                    n + 1,
+                    device=batch.device,
+                    dtype=torch.long,
+                ),
+            ],
+            dim=1,
+        )
+        new_right_break = after_shifted.sub(first_shifted).abs().ne(1).to(torch.float32)
+        next_breakpoints = (
+            current_breakpoints
+            - old_left_break
+            - old_right_break
+            + new_left_break
+            + new_right_break
+        )
+
+        action_lengths_float = action_lengths.to(torch.float32).view(1, action_count)
+        first_value = (batch[:, :1].to(torch.float32) / denom).expand(
+            -1,
+            action_count,
+        )
+        kth_value = batch[:, 1:].to(torch.float32) / denom
+        after_value = torch.cat(
+            [
+                batch[:, 2:].to(torch.float32) / denom,
+                torch.ones(batch_size, 1, device=batch.device),
+            ],
+            dim=1,
+        )
+        features = torch.stack(
+            [
+                action_lengths_float.expand(batch_size, -1) / float(n),
+                (action_lengths_float.expand(batch_size, -1) - 1.0) / denom,
+                action_lengths
+                .eq(n)
+                .to(torch.float32)
+                .view(1, action_count)
+                .expand(
+                    batch_size,
+                    -1,
+                ),
+                first_value,
+                kth_value,
+                after_value,
+                current_fraction.expand(-1, action_count),
+                (next_breakpoints - current_breakpoints) / float(n + 1),
+                next_breakpoints / float(n + 1),
+            ],
+            dim=-1,
+        )
+        return features.to(self.model_dtype)
 
     @staticmethod
     def action_ids_to_prefix_lengths(states: torch.Tensor) -> torch.Tensor:
