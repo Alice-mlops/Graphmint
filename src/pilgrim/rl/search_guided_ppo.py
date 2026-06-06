@@ -60,8 +60,10 @@ class _RolloutSummary:
     reward_search_bonus_mean: float
     beam_rollout_queries: int
     beam_rollout_successes: int
+    beam_rollout_rows_added: int
     beam_archive_queries: int
     beam_archive_successes: int
+    beam_archive_rows_added: int
 
 
 class SearchGuidedPPOTrainer:
@@ -211,8 +213,10 @@ class SearchGuidedPPOTrainer:
             reward_search_bonus_mean = float(rollout_summary.reward_search_bonus_mean)
             beam_rollout_queries = int(rollout_summary.beam_rollout_queries)
             beam_rollout_successes = int(rollout_summary.beam_rollout_successes)
+            beam_rollout_rows_added = int(rollout_summary.beam_rollout_rows_added)
             beam_archive_queries = int(rollout_summary.beam_archive_queries)
             beam_archive_successes = int(rollout_summary.beam_archive_successes)
+            beam_archive_rows_added = int(rollout_summary.beam_archive_rows_added)
         else:
             archive_target_stats = self._refresh_search_archive_from_sampled_states()
             rollout_summary = None
@@ -227,8 +231,10 @@ class SearchGuidedPPOTrainer:
             reward_search_bonus_mean = 0.0
             beam_rollout_queries = 0
             beam_rollout_successes = 0
+            beam_rollout_rows_added = 0
             beam_archive_queries = int(archive_target_stats.queried)
             beam_archive_successes = int(archive_target_stats.path_found)
+            beam_archive_rows_added = int(archive_target_stats.rows_added)
         rollout_collect_time_s = time.perf_counter() - rollout_started
 
         optimize_started = time.perf_counter()
@@ -290,8 +296,10 @@ class SearchGuidedPPOTrainer:
             else len(self.search_archive),
             beam_rollout_queries=beam_rollout_queries,
             beam_rollout_successes=beam_rollout_successes,
+            beam_rollout_rows_added=beam_rollout_rows_added,
             beam_archive_queries=beam_archive_queries,
             beam_archive_successes=beam_archive_successes,
+            beam_archive_rows_added=beam_archive_rows_added,
         )
         return metrics, diagnostics
 
@@ -578,8 +586,10 @@ class SearchGuidedPPOTrainer:
                 ),
                 beam_rollout_queries=int(rollout_target_stats.queried),
                 beam_rollout_successes=int(rollout_target_stats.path_found),
+                beam_rollout_rows_added=int(rollout_target_stats.rows_added),
                 beam_archive_queries=int(archive_target_stats.queried),
                 beam_archive_successes=int(archive_target_stats.path_found),
+                beam_archive_rows_added=int(archive_target_stats.rows_added),
             )
         finally:
             self.model.train(was_training)
@@ -918,6 +928,7 @@ class SearchGuidedPPOTrainer:
             self.model,
             subset_states,
             self.config.beam_search,
+            expand_paths=False,
         )
         if target_set is None:
             return None, stats

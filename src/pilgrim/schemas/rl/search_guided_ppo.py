@@ -15,6 +15,7 @@ from .multistep_td_value_iteration import (
 from .parallel import TDParallelConfig
 
 BeamMode = Literal["simple", "advanced", "iterated"]
+PathTargetWeightMode = Literal["uniform", "per_path_normalized"]
 
 
 class SearchGuidedPPORolloutConfig(BaseModel):
@@ -123,6 +124,14 @@ class SearchGuidedPPOBeamSearchConfig(BaseModel):
         archive_capacity: Maximum number of beam-derived targets retained.
         archive_batch_size: Number of beam-derived rows sampled per PPO
             minibatch.
+        archive_path_targets: Whether one solved beam path should add
+            supervision for multiple states along that path instead of only the
+            source state.
+        archive_path_stride: Keep every Nth state along a solved path when
+            ``archive_path_targets`` is enabled.
+        archive_max_path_rows_per_solve: Optional cap on rows added from one
+            solved path after stride selection.
+        archive_path_weight_mode: Per-row weighting for path-expanded targets.
 
     Raises:
         ValueError: If one of the configured beam widths is not positive.
@@ -143,6 +152,10 @@ class SearchGuidedPPOBeamSearchConfig(BaseModel):
     archive_targets_per_update: int = Field(64, ge=0)
     archive_capacity: int = Field(100_000, ge=1)
     archive_batch_size: int = Field(256, ge=1)
+    archive_path_targets: bool = False
+    archive_path_stride: int = Field(1, ge=1)
+    archive_max_path_rows_per_solve: int | None = Field(default=None, ge=1)
+    archive_path_weight_mode: PathTargetWeightMode = "per_path_normalized"
 
     @model_validator(mode="after")
     def validate_config(self) -> SearchGuidedPPOBeamSearchConfig:
@@ -370,6 +383,16 @@ class SearchGuidedPPOConfig(BaseModel):
             ),
             "beam.archive_capacity": int(self.beam_search.archive_capacity),
             "beam.archive_batch_size": int(self.beam_search.archive_batch_size),
+            "beam.archive_path_targets": bool(self.beam_search.archive_path_targets),
+            "beam.archive_path_stride": int(self.beam_search.archive_path_stride),
+            "beam.archive_max_path_rows_per_solve": (
+                None
+                if self.beam_search.archive_max_path_rows_per_solve is None
+                else int(self.beam_search.archive_max_path_rows_per_solve)
+            ),
+            "beam.archive_path_weight_mode": str(
+                self.beam_search.archive_path_weight_mode
+            ),
             "aux.updates_per_step": int(self.auxiliary.updates_per_step),
             "aux.demo_policy_coef": float(self.auxiliary.demo_policy_coef),
             "aux.demo_value_coef": float(self.auxiliary.demo_value_coef),
@@ -472,10 +495,12 @@ class SearchGuidedPPOStepDiagnostics(BaseModel):
             rewards.
         beam_rollout_successes: Number of rollout-start beam searches that
             returned a path.
+        beam_rollout_rows_added: Number of rollout-start guidance rows produced.
         beam_archive_queries: Number of beam-search queries used to augment the
             search archive.
         beam_archive_successes: Number of archive beam searches that returned a
             path.
+        beam_archive_rows_added: Number of search-archive rows produced.
 
     """
 
@@ -505,5 +530,7 @@ class SearchGuidedPPOStepDiagnostics(BaseModel):
     search_archive_size: int = Field(..., ge=0)
     beam_rollout_queries: int = Field(..., ge=0)
     beam_rollout_successes: int = Field(..., ge=0)
+    beam_rollout_rows_added: int = Field(..., ge=0)
     beam_archive_queries: int = Field(..., ge=0)
     beam_archive_successes: int = Field(..., ge=0)
+    beam_archive_rows_added: int = Field(..., ge=0)

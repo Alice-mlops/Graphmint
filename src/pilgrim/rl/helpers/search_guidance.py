@@ -14,6 +14,7 @@ from torch import nn
 from ...schemas.rl.search_guided_ppo import SearchGuidedPPOBeamSearchConfig
 from ..supervision_archive import PolicySupervisionBatch
 from .ppo import forward_policy_value
+from .q_learning import apply_actions
 
 _ZERO_EPS = 1e-12
 
@@ -84,6 +85,7 @@ def collect_beam_search_targets(  # noqa: PLR0912, PLR0914, PLR0915
     config: SearchGuidedPPOBeamSearchConfig,
     *,
     limit: int | None = None,
+    expand_paths: bool | None = None,
 ) -> tuple[BeamSearchTargetSet | None, BeamSearchTargetStats]:
     """
     Run beam search from a subset of states and build supervision targets.
@@ -94,6 +96,8 @@ def collect_beam_search_targets(  # noqa: PLR0912, PLR0914, PLR0915
         states: Candidate source states.
         config: Beam-search guidance configuration.
         limit: Optional cap on the number of states searched from ``states``.
+        expand_paths: Optional override for whether solved paths should add
+            intermediate-state targets.
 
     Returns:
         Tuple ``(targets, stats)`` where ``targets`` is ``None`` when no beam
@@ -177,13 +181,24 @@ def collect_beam_search_targets(  # noqa: PLR0912, PLR0914, PLR0915
                 path = [int(action) for action in list(best_result.path)]
                 if not path:
                     continue
-                kept_states.append(state.detach().cpu().view(1, -1))
-                action_targets.append(int(path[0]))
-                value_targets.append(float(int(best_result.path_length)))
-                weights.append(1.0)
-                state_indices.append(int(source_index))
-                path_lengths.append(int(best_result.path_length))
-                best_widths.append(int(best_width if best_width is not None else 0))
+                _append_beam_path_supervision(
+                    graph=graph,
+                    state=state,
+                    path=path,
+                    source_index=int(source_index),
+                    best_width=int(best_width if best_width is not None else 0),
+                    config=config,
+                    expand_path=bool(config.archive_path_targets)
+                    if expand_paths is None
+                    else bool(expand_paths),
+                    kept_states=kept_states,
+                    action_targets=action_targets,
+                    value_targets=value_targets,
+                    weights=weights,
+                    state_indices=state_indices,
+                    path_lengths=path_lengths,
+                    best_widths=best_widths,
+                )
     finally:
         model.train(was_training)
 
@@ -212,6 +227,124 @@ def collect_beam_search_targets(  # noqa: PLR0912, PLR0914, PLR0915
             ),
         ),
     )
+
+
+def _append_beam_path_supervision(
+    *,
+    graph: CayleyGraph,
+    state: torch.Tensor,
+    path: list[int],
+    source_index: int,
+    best_width: int,
+    config: SearchGuidedPPOBeamSearchConfig,
+    expand_path: bool,
+    kept_states: list[torch.Tensor],
+    action_targets: list[int],
+    value_targets: list[float],
+    weights: list[float],
+    state_indices: list[int],
+    path_lengths: list[int],
+    best_widths: list[int],
+) -> None:
+    """
+    Append one-row or path-expanded supervision from a solved beam path.
+
+    Args:
+        graph: Cayley graph used to apply path actions.
+        state: Source state solved by beam search.
+        path: Generator ids returned by beam search.
+        source_index: Row index inside the source-state batch.
+        best_width: Beam width that produced the retained path.
+        config: Beam-search guidance configuration.
+        expand_path: Whether to add selected intermediate path states.
+        kept_states: Output list for supervision states.
+        action_targets: Output list for policy targets.
+        value_targets: Output list for value targets.
+        weights: Output list for row weights.
+        state_indices: Output list for source-state indices.
+        path_lengths: Output list for remaining path lengths.
+        best_widths: Output list for retained beam widths.
+
+    """
+    if not expand_path:
+        kept_states.append(state.detach().cpu().view(1, -1))
+        action_targets.append(int(path[0]))
+        value_targets.append(float(len(path)))
+        weights.append(1.0)
+        state_indices.append(int(source_index))
+        path_lengths.append(len(path))
+        best_widths.append(int(best_width))
+        return
+
+    positions = _select_path_target_positions(
+        path_length=len(path),
+        stride=int(config.archive_path_stride),
+        max_rows=config.archive_max_path_rows_per_solve,
+    )
+    if not positions:
+        return
+    position_set = set(positions)
+    row_weight = (
+        1.0 / float(len(positions))
+        if str(config.archive_path_weight_mode) == "per_path_normalized"
+        else 1.0
+    )
+    current_state = state.detach().clone().view(1, -1).to(graph.device).long()
+    for step_index, action in enumerate(path):
+        if step_index in position_set:
+            kept_states.append(current_state.detach().cpu())
+            action_targets.append(int(action))
+            value_targets.append(float(len(path) - step_index))
+            weights.append(float(row_weight))
+            state_indices.append(int(source_index))
+            path_lengths.append(int(len(path) - step_index))
+            best_widths.append(int(best_width))
+        current_state = apply_actions(
+            graph,
+            current_state,
+            torch.tensor([int(action)], device=current_state.device),
+        )
+
+
+def _select_path_target_positions(
+    *,
+    path_length: int,
+    stride: int,
+    max_rows: int | None,
+) -> list[int]:
+    """
+    Select path positions whose pre-action states become supervision rows.
+
+    Args:
+        path_length: Number of actions in the solved path.
+        stride: Keep every Nth pre-action state.
+        max_rows: Optional cap after stride selection.
+
+    Returns:
+        Zero-based action positions to keep.
+
+    """
+    if int(path_length) <= 0:
+        return []
+    positions = list(range(0, int(path_length), max(1, int(stride))))
+    if max_rows is None or len(positions) <= int(max_rows):
+        return positions
+    cap = max(1, int(max_rows))
+    if cap == 1:
+        return [positions[0]]
+    step = float(len(positions) - 1) / float(cap - 1)
+    selected: list[int] = []
+    for output_index in range(cap):
+        position = positions[round(float(output_index) * step)]
+        if not selected or selected[-1] != position:
+            selected.append(position)
+    cursor = 0
+    while len(selected) < cap and cursor < len(positions):
+        position = positions[cursor]
+        if position not in selected:
+            selected.append(position)
+        cursor += 1
+    return sorted(selected)
 
 
 def beam_action_reward_bonus(
