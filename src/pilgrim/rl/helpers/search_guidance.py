@@ -75,6 +75,8 @@ class _AuxValuePredictor(nn.Module):
             One-dimensional value tensor.
 
         """
+        if hasattr(self.model, "forward_value"):
+            return self.model.forward_value(states)
         return forward_policy_value(self.model, states).values
 
 
