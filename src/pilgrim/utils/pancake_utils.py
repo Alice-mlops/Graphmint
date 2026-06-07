@@ -81,12 +81,13 @@ def convert_to_rk_format(internal_path: Sequence[int], graph: CayleyGraph) -> li
     return moves
 
 
-def solve(  # noqa: PLR0914
+def solve(  # noqa: PLR0912, PLR0914, PLR0915
     permutation: Sequence[int] | np.ndarray,
     graph: CayleyGraph,
     model: nn.Module,
     heuristic_path: str,
     *,
+    action_model: nn.Module | None = None,
     beam_width: int = 10_000,
     max_steps: int | None = None,
     history_depth: int = 20,
@@ -112,8 +113,10 @@ def solve(  # noqa: PLR0914
     Args:
         permutation: Starting permutation/state to solve.
         graph: Cayley graph to search on.
-        model: Model used by ``cayleypy.Predictor``.
+        model: Value model used by ``cayleypy.Predictor``.
         heuristic_path: Baseline solution in Kaggle format, e.g. ``"R3.R5"``.
+        action_model: Optional policy model used to select top-k actions.
+            Defaults to ``model``.
         beam_width: Beam width to use for the search.
         max_steps: Maximum number of steps to search. Defaults to ``3 * n``,
             where ``n`` is the permutation length.
@@ -153,6 +156,10 @@ def solve(  # noqa: PLR0914
     n = int(start_state.shape[0])
     steps = 3 * n if max_steps is None else int(max_steps)
     model.eval()
+    if action_model is None:
+        action_model = model
+    else:
+        action_model.eval()
 
     graph_device = graph.device
     if not isinstance(graph_device, torch.device):
@@ -188,7 +195,8 @@ def solve(  # noqa: PLR0914
         with torch.inference_mode(), amp_ctx:
             topk_scorer = _build_topk_action_scorer(
                 graph=graph,
-                model=model,
+                action_model=action_model,
+                value_model=model,
                 beam_mode=str(beam_mode),
                 action_top_k=int(action_top_k),
                 action_mode=str(action_mode),
@@ -241,7 +249,8 @@ def solve(  # noqa: PLR0914
 def _build_topk_action_scorer(
     *,
     graph: CayleyGraph,
-    model: nn.Module,
+    action_model: nn.Module,
+    value_model: nn.Module,
     beam_mode: str,
     action_top_k: int,
     action_mode: str,
@@ -255,7 +264,8 @@ def _build_topk_action_scorer(
 
     Args:
         graph: Cayley graph searched by CayleyPy.
-        model: Policy/value model.
+        action_model: Model used for policy logits.
+        value_model: Model used for value scoring.
         beam_mode: Effective CayleyPy beam mode.
         action_top_k: Number of actions retained per beam state.
         action_mode: ``"topk"`` or ``"topp"`` action selection mode.
@@ -283,7 +293,8 @@ def _build_topk_action_scorer(
         ) from exc
     return TopKActionScorer(
         graph,
-        model,
+        action_model,
+        value_model=value_model,
         action_top_k=int(action_top_k),
         action_mode=str(action_mode),
         top_p=float(top_p),
