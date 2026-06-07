@@ -5,7 +5,12 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
 import torch
+from pilgrim.schemas.rl import SearchGuidedPPOBeamSearchConfig, SearchGuidedPPOConfig
+
+ACTION_TOP_K = 4
+POLICY_PRESELECT_FACTOR = 2.0
 
 
 class ForwardValueOnlyModel(torch.nn.Module):
@@ -60,3 +65,25 @@ def test_aux_value_predictor_uses_forward_value_fast_path() -> None:
     assert values.tolist() == [6.0, 15.0]
     assert model.value_calls == 1
     assert model.readout_calls == 0
+
+
+def test_search_guided_ppo_topk_config_is_logged() -> None:
+    """Check that top-k beam settings survive schema validation and logging."""
+    config = SearchGuidedPPOConfig(
+        beam_search=SearchGuidedPPOBeamSearchConfig(
+            beam_mode="topk",
+            action_top_k=ACTION_TOP_K,
+            action_mode="topk",
+            policy_preselect_factor=POLICY_PRESELECT_FACTOR,
+        )
+    )
+
+    log_dict = config.to_log_dict()
+
+    assert config.beam_search.beam_mode == "topk"
+    assert config.beam_search.action_top_k == ACTION_TOP_K
+    assert log_dict["beam.mode"] == "topk"
+    assert log_dict["beam.action_top_k"] == ACTION_TOP_K
+    assert log_dict["beam.policy_preselect_factor"] == pytest.approx(
+        POLICY_PRESELECT_FACTOR
+    )

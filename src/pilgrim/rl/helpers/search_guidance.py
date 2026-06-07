@@ -17,6 +17,7 @@ from .ppo import forward_policy_value
 from .q_learning import apply_actions
 
 _ZERO_EPS = 1e-12
+_TOPK_BEAM_MODES = {"topk", "policy_topk"}
 
 
 @dataclass(slots=True, frozen=True)
@@ -123,6 +124,12 @@ def collect_beam_search_targets(  # noqa: PLR0912, PLR0914, PLR0915
     predictor_model = _AuxValuePredictor(model)
     predictor_model.eval()
     predictor = Predictor(graph, predictor_model)
+    topk_scorer = _build_topk_action_scorer(
+        graph=graph,
+        model=model,
+        value_model=predictor_model,
+        config=config,
+    )
     amp_ctx = _beam_autocast_context(graph, config)
 
     kept_states: list[torch.Tensor] = []
@@ -135,7 +142,7 @@ def collect_beam_search_targets(  # noqa: PLR0912, PLR0914, PLR0915
 
     queried = 0
     found = 0
-    try:
+    try:  # noqa: PLR1702
         with torch.inference_mode(), amp_ctx:
             center_state = (
                 torch
@@ -156,16 +163,22 @@ def collect_beam_search_targets(  # noqa: PLR0912, PLR0914, PLR0915
                 for beam_width in config.beam_widths:
                     graph.free_memory()
                     try:
-                        result = graph.beam_search(
-                            start_state=state.detach().cpu().tolist(),
-                            beam_width=int(beam_width),
-                            max_steps=int(config.max_steps),
-                            predictor=predictor,
-                            history_depth=int(config.history_depth),
-                            beam_mode=str(config.beam_mode),
-                            return_path=True,
-                            verbose=0,
-                        )
+                        beam_kwargs: dict[str, Any] = {
+                            "start_state": state.detach().cpu().tolist(),
+                            "beam_width": int(beam_width),
+                            "max_steps": int(config.max_steps),
+                            "predictor": predictor,
+                            "history_depth": int(config.history_depth),
+                            "beam_mode": str(config.beam_mode),
+                            "return_path": True,
+                            "verbose": 0,
+                        }
+                        if topk_scorer is not None:
+                            beam_kwargs["topk_scorer"] = topk_scorer
+                            beam_kwargs["policy_preselect_factor"] = (
+                                config.policy_preselect_factor
+                            )
+                        result = graph.beam_search(**beam_kwargs)
                     except Exception:
                         continue
                     if not bool(result.path_found):
@@ -347,6 +360,57 @@ def _select_path_target_positions(
             selected.append(position)
         cursor += 1
     return sorted(selected)
+
+
+def _build_topk_action_scorer(
+    *,
+    graph: CayleyGraph,
+    model: nn.Module,
+    value_model: nn.Module,
+    config: SearchGuidedPPOBeamSearchConfig,
+) -> object | None:
+    """
+    Build a CayleyPy policy-action scorer when top-k beam mode is requested.
+
+    Args:
+        graph: Cayley graph passed to CayleyPy beam search.
+        model: Actor-critic model used for policy logits.
+        value_model: Value-only wrapper used for candidate scoring.
+        config: Beam-search guidance settings.
+
+    Returns:
+        A ``TopKActionScorer`` instance, or ``None`` for non-top-k beam modes.
+
+    Raises:
+        RuntimeError: If top-k mode is requested but the active CayleyPy package
+            does not expose ``TopKActionScorer``.
+    """
+    if str(config.beam_mode) not in _TOPK_BEAM_MODES:
+        return None
+    try:
+        from cayleypy import TopKActionScorer  # noqa: PLC0415
+    except ImportError as exc:
+        raise RuntimeError(
+            "beam_mode='topk' requires a CayleyPy build that exports "
+            "TopKActionScorer. Put experiments/cayleypy_policy_value_beam/"
+            "cayleypy first in PYTHONPATH or install that fork."
+        ) from exc
+
+    dtype = _resolve_torch_dtype(config.autocast_dtype_name)
+    autocast_dtype = dtype if isinstance(dtype, torch.dtype) else torch.bfloat16
+    if config.enable_autocast is False:
+        autocast_dtype = None
+    return TopKActionScorer(
+        graph,
+        model,
+        value_model=value_model,
+        action_top_k=int(config.action_top_k),
+        action_mode=str(config.action_mode),
+        top_p=float(config.top_p),
+        min_actions=int(config.min_actions),
+        max_actions=config.max_actions,
+        autocast_dtype=autocast_dtype,
+    )
 
 
 def beam_action_reward_bonus(

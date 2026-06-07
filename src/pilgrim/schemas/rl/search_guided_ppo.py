@@ -14,7 +14,8 @@ from .multistep_td_value_iteration import (
 )
 from .parallel import TDParallelConfig
 
-BeamMode = Literal["simple", "advanced", "iterated"]
+BeamMode = Literal["simple", "advanced", "iterated", "topk", "policy_topk"]
+ActionSelectionMode = Literal["topk", "topp"]
 PathTargetWeightMode = Literal["uniform", "per_path_normalized"]
 
 
@@ -114,6 +115,14 @@ class SearchGuidedPPOBeamSearchConfig(BaseModel):
         max_steps: Maximum beam-search depth.
         history_depth: Beam-search history depth.
         beam_mode: Beam-search variant passed to `cayleypy`.
+        action_top_k: Number of policy-ranked actions retained per beam state
+            when ``beam_mode`` is ``"topk"`` or ``"policy_topk"``.
+        action_mode: Action selection mode for top-k beam search.
+        top_p: Cumulative probability threshold for ``action_mode="topp"``.
+        min_actions: Minimum actions retained in top-p mode.
+        max_actions: Optional maximum actions retained in top-p mode.
+        policy_preselect_factor: Optional candidate preselection factor before
+            value scoring in top-k beam search.
         enable_tf32: Optional TF32 override for CUDA beam-search inference.
         enable_autocast: Optional autocast override.
         autocast_dtype_name: Autocast dtype name such as `"bfloat16"`.
@@ -145,6 +154,12 @@ class SearchGuidedPPOBeamSearchConfig(BaseModel):
     max_steps: int = Field(128, ge=1)
     history_depth: int = Field(0, ge=0)
     beam_mode: BeamMode = "iterated"
+    action_top_k: int = Field(8, ge=1)
+    action_mode: ActionSelectionMode = "topk"
+    top_p: float = Field(0.9, gt=0.0, le=1.0)
+    min_actions: int = Field(1, ge=1)
+    max_actions: int | None = Field(default=None, ge=1)
+    policy_preselect_factor: float | None = Field(default=None, gt=0.0)
     enable_tf32: bool | None = None
     enable_autocast: bool | None = None
     autocast_dtype_name: str = "bfloat16"
@@ -174,6 +189,10 @@ class SearchGuidedPPOBeamSearchConfig(BaseModel):
             raise ValueError(
                 f"beam_search.beam_widths must be positive, got {invalid_widths!r}."
             )
+        if self.max_actions is not None and int(self.min_actions) > int(
+            self.max_actions
+        ):
+            raise ValueError("beam_search.min_actions must be <= max_actions.")
         return self
 
 
@@ -374,6 +393,16 @@ class SearchGuidedPPOConfig(BaseModel):
             "beam.max_steps": int(self.beam_search.max_steps),
             "beam.history_depth": int(self.beam_search.history_depth),
             "beam.mode": str(self.beam_search.beam_mode),
+            "beam.action_top_k": int(self.beam_search.action_top_k),
+            "beam.action_mode": str(self.beam_search.action_mode),
+            "beam.top_p": float(self.beam_search.top_p),
+            "beam.min_actions": int(self.beam_search.min_actions),
+            "beam.max_actions": None
+            if self.beam_search.max_actions is None
+            else int(self.beam_search.max_actions),
+            "beam.policy_preselect_factor": None
+            if self.beam_search.policy_preselect_factor is None
+            else float(self.beam_search.policy_preselect_factor),
             "beam.enable_tf32": self.beam_search.enable_tf32,
             "beam.enable_autocast": self.beam_search.enable_autocast,
             "beam.autocast_dtype_name": str(self.beam_search.autocast_dtype_name),

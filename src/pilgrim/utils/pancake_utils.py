@@ -13,6 +13,8 @@ from torch import nn
 
 from .graph_utils import identity
 
+_TOPK_BEAM_MODES = {"topk", "policy_topk"}
+
 
 def find_prefix_length(generator_perm: Sequence[int]) -> int:
     """
@@ -79,7 +81,7 @@ def convert_to_rk_format(internal_path: Sequence[int], graph: CayleyGraph) -> li
     return moves
 
 
-def solve(
+def solve(  # noqa: PLR0914
     permutation: Sequence[int] | np.ndarray,
     graph: CayleyGraph,
     model: nn.Module,
@@ -88,6 +90,13 @@ def solve(
     beam_width: int = 10_000,
     max_steps: int | None = None,
     history_depth: int = 20,
+    beam_mode: str = "simple",
+    action_top_k: int = 8,
+    action_mode: str = "topk",
+    top_p: float = 0.9,
+    min_actions: int = 1,
+    max_actions: int | None = None,
+    policy_preselect_factor: float | None = None,
     enable_tf32: bool | None = None,
     enable_autocast: bool | None = None,
     autocast_dtype: torch.dtype = torch.float16,
@@ -108,6 +117,20 @@ def solve(
         beam_width: Beam width to use for the search.
         max_steps: Maximum number of steps to search. Defaults to ``3 * n``,
             where ``n`` is the permutation length.
+        history_depth: Number of recent beam layers CayleyPy can ban in
+            non-simple beam modes.
+        beam_mode: CayleyPy beam mode: ``"simple"``, ``"advanced"``, or
+            ``"iterated"``. The local top-k CayleyPy fork also supports
+            ``"topk"`` and ``"policy_topk"``.
+        action_top_k: Number of policy-ranked actions retained per beam state
+            in top-k beam mode.
+        action_mode: Action candidate selection mode, ``"topk"`` or
+            ``"topp"``.
+        top_p: Cumulative probability threshold for ``action_mode="topp"``.
+        min_actions: Minimum actions retained for top-p action selection.
+        max_actions: Optional maximum actions retained for top-p selection.
+        policy_preselect_factor: Optional policy-score candidate preselection
+            factor before value scoring in top-k beam mode.
         enable_tf32: Controls CUDA TF32 matmul/cudnn behavior. ``None`` means:
             enable on CUDA and disable otherwise.
         enable_autocast: Controls AMP autocast during search. ``None`` means:
@@ -120,6 +143,10 @@ def solve(
     Returns:
         A solution path in Kaggle format. If beam search fails or is not an
         improvement, returns ``heuristic_path`` unchanged.
+
+    Raises:
+        TypeError: If CayleyPy rejects a beam-search argument other than the
+            optional ``memory_cleanup`` compatibility kwarg.
 
     """
     start_state = np.asarray(permutation)
@@ -159,6 +186,17 @@ def solve(
         )
 
         with torch.inference_mode(), amp_ctx:
+            topk_scorer = _build_topk_action_scorer(
+                graph=graph,
+                model=model,
+                beam_mode=str(beam_mode),
+                action_top_k=int(action_top_k),
+                action_mode=str(action_mode),
+                top_p=float(top_p),
+                min_actions=int(min_actions),
+                max_actions=max_actions,
+                autocast_dtype=autocast_dtype if use_autocast else None,
+            )
             beam_kwargs: dict[str, Any] = {
                 "start_state": start_state,
                 "beam_width": int(beam_width),
@@ -166,9 +204,12 @@ def solve(
                 "predictor": Predictor(graph, model),
                 "return_path": True,
                 "memory_cleanup": False,
-                "beam_mode": "simple",
+                "beam_mode": str(beam_mode),
                 "history_depth": history_depth,
             }
+            if topk_scorer is not None:
+                beam_kwargs["topk_scorer"] = topk_scorer
+                beam_kwargs["policy_preselect_factor"] = policy_preselect_factor
             try:
                 result = graph.beam_search(**beam_kwargs)
             except TypeError as exc:
@@ -197,12 +238,68 @@ def solve(
     return heuristic_path
 
 
+def _build_topk_action_scorer(
+    *,
+    graph: CayleyGraph,
+    model: nn.Module,
+    beam_mode: str,
+    action_top_k: int,
+    action_mode: str,
+    top_p: float,
+    min_actions: int,
+    max_actions: int | None,
+    autocast_dtype: torch.dtype | None,
+) -> object | None:
+    """
+    Build CayleyPy top-k scorer for policy-guided beam modes.
+
+    Args:
+        graph: Cayley graph searched by CayleyPy.
+        model: Policy/value model.
+        beam_mode: Effective CayleyPy beam mode.
+        action_top_k: Number of actions retained per beam state.
+        action_mode: ``"topk"`` or ``"topp"`` action selection mode.
+        top_p: Cumulative probability threshold for top-p selection.
+        min_actions: Minimum actions retained in top-p mode.
+        max_actions: Optional maximum actions retained in top-p mode.
+        autocast_dtype: Optional dtype used by CayleyPy scorer autocast.
+
+    Returns:
+        A ``TopKActionScorer`` instance for top-k modes, otherwise ``None``.
+
+    Raises:
+        RuntimeError: If top-k mode is requested with a CayleyPy build that does
+            not expose ``TopKActionScorer``.
+    """
+    if str(beam_mode) not in _TOPK_BEAM_MODES:
+        return None
+    try:
+        from cayleypy import TopKActionScorer  # noqa: PLC0415
+    except ImportError as exc:
+        raise RuntimeError(
+            "beam_mode='topk' requires a CayleyPy build that exports "
+            "TopKActionScorer. Put experiments/cayleypy_policy_value_beam/"
+            "cayleypy first in PYTHONPATH or install that fork."
+        ) from exc
+    return TopKActionScorer(
+        graph,
+        model,
+        action_top_k=int(action_top_k),
+        action_mode=str(action_mode),
+        top_p=float(top_p),
+        min_actions=int(min_actions),
+        max_actions=max_actions,
+        autocast_dtype=autocast_dtype,
+    )
+
+
 def make_graph_for_n(
     n: int,
     *,
     batch_size: int = 2**17,
     dtype: torch.dtype = torch.int8,
     device: str | torch.device | None = None,
+    bit_encoding_width: int | str | None = "auto",
 ) -> CayleyGraph:
     """
     Construct a pancake-group ``CayleyGraph`` for a given ``n``.
@@ -215,6 +312,9 @@ def make_graph_for_n(
         batch_size: Internal batch size for batched graph operations.
         dtype: Data type for graph state tensors.
         device: Optional device for the graph (e.g. ``"cpu"`` or ``"cuda"``).
+        bit_encoding_width: CayleyPy permutation encoding width. Use ``None``
+            for dense permutation states and vectorized gather generator
+            application.
 
     Returns:
         A configured ``cayleypy.CayleyGraph`` instance.
@@ -224,7 +324,11 @@ def make_graph_for_n(
     group = (
         PermutationGroups.pancake(n).make_inverse_closed().with_central_state(central)
     )
-    kwargs: dict[str, Any] = {"dtype": dtype, "batch_size": int(batch_size)}
+    kwargs: dict[str, Any] = {
+        "dtype": dtype,
+        "batch_size": int(batch_size),
+        "bit_encoding_width": bit_encoding_width,
+    }
     if device is not None:
         kwargs["device"] = device
     return CayleyGraph(group, **kwargs)
