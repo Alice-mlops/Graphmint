@@ -13,6 +13,7 @@ from torch import nn
 
 from ...schemas.rl.search_guided_ppo import SearchGuidedPPOBeamSearchConfig
 from ..supervision_archive import PolicySupervisionBatch
+from .path_recovery_sampling import sample_policy_recovery_neighbor_rows
 from .ppo import forward_policy_value
 from .q_learning import apply_actions
 
@@ -198,6 +199,7 @@ def collect_beam_search_targets(  # noqa: PLR0912, PLR0914, PLR0915
                     continue
                 _append_beam_path_supervision(
                     graph=graph,
+                    model=model,
                     state=state,
                     path=path,
                     source_index=int(source_index),
@@ -247,6 +249,7 @@ def collect_beam_search_targets(  # noqa: PLR0912, PLR0914, PLR0915
 def _append_beam_path_supervision(
     *,
     graph: CayleyGraph,
+    model: nn.Module | None = None,
     state: torch.Tensor,
     path: list[int],
     source_index: int,
@@ -266,6 +269,8 @@ def _append_beam_path_supervision(
 
     Args:
         graph: Cayley graph used to apply path actions.
+        model: Optional actor-critic model used to rank recovery-neighbor
+            perturbations.
         state: Source state solved by beam search.
         path: Generator ids returned by beam search.
         source_index: Row index inside the source-state batch.
@@ -305,20 +310,54 @@ def _append_beam_path_supervision(
         else 1.0
     )
     current_state = state.detach().clone().view(1, -1).to(graph.device).long()
+    selected_states: list[torch.Tensor] = []
+    selected_actions: list[int] = []
+    selected_remaining_lengths: list[int] = []
     for step_index, action in enumerate(path):
         if step_index in position_set:
             kept_states.append(current_state.detach().cpu())
             action_targets.append(int(action))
-            value_targets.append(float(len(path) - step_index))
+            remaining_length = int(len(path) - step_index)
+            value_targets.append(float(remaining_length))
             weights.append(float(row_weight))
             state_indices.append(int(source_index))
-            path_lengths.append(int(len(path) - step_index))
+            path_lengths.append(remaining_length)
             best_widths.append(int(best_width))
+            selected_states.append(current_state.detach().cpu())
+            selected_actions.append(int(action))
+            selected_remaining_lengths.append(remaining_length)
         current_state = apply_actions(
             graph,
             current_state,
             torch.tensor([int(action)], device=current_state.device),
         )
+
+    if (
+        model is not None
+        and bool(config.archive_neighbor_targets)
+        and int(config.archive_neighbor_top_k) > 0
+    ):
+        neighbor_rows = sample_policy_recovery_neighbor_rows(
+            graph=graph,
+            model=model,
+            path_states=selected_states,
+            path_actions=selected_actions,
+            remaining_lengths=selected_remaining_lengths,
+            source_index=int(source_index),
+            best_width=int(best_width),
+            top_k=int(config.archive_neighbor_top_k),
+            row_weight=float(row_weight),
+            neighbor_weight=float(config.archive_neighbor_weight),
+            max_rows=config.archive_neighbor_max_rows_per_solve,
+            exclude_path_action=bool(config.archive_neighbor_exclude_path_action),
+        )
+        kept_states.extend(neighbor_rows.states)
+        action_targets.extend(neighbor_rows.action_targets)
+        value_targets.extend(neighbor_rows.value_targets)
+        weights.extend(neighbor_rows.weights)
+        state_indices.extend(neighbor_rows.source_indices)
+        path_lengths.extend(neighbor_rows.path_lengths)
+        best_widths.extend(neighbor_rows.best_widths)
 
 
 def _select_path_target_positions(

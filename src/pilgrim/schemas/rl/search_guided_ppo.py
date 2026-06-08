@@ -141,6 +141,18 @@ class SearchGuidedPPOBeamSearchConfig(BaseModel):
         archive_max_path_rows_per_solve: Optional cap on rows added from one
             solved path after stride selection.
         archive_path_weight_mode: Per-row weighting for path-expanded targets.
+        archive_neighbor_targets: Whether solved path states should also add
+            one-hop recovery-neighbor targets.
+        archive_neighbor_top_k: Number of policy-ranked perturbation actions
+            sampled per selected path state.
+        archive_neighbor_weight: Total supervised weight assigned to recovery
+            neighbors around one path state, expressed as a multiplier of the
+            path-state row weight.
+        archive_neighbor_max_rows_per_solve: Optional cap on recovery-neighbor
+            rows added from one solved path.
+        archive_neighbor_exclude_path_action: Whether to exclude the certified
+            next path action from perturbation candidates to avoid conflicting
+            labels for the next path state.
 
     Raises:
         ValueError: If one of the configured beam widths is not positive.
@@ -171,6 +183,11 @@ class SearchGuidedPPOBeamSearchConfig(BaseModel):
     archive_path_stride: int = Field(1, ge=1)
     archive_max_path_rows_per_solve: int | None = Field(default=None, ge=1)
     archive_path_weight_mode: PathTargetWeightMode = "per_path_normalized"
+    archive_neighbor_targets: bool = False
+    archive_neighbor_top_k: int = Field(0, ge=0)
+    archive_neighbor_weight: float = Field(0.25, ge=0.0)
+    archive_neighbor_max_rows_per_solve: int | None = Field(default=None, ge=1)
+    archive_neighbor_exclude_path_action: bool = True
 
     @model_validator(mode="after")
     def validate_config(self) -> SearchGuidedPPOBeamSearchConfig:
@@ -421,6 +438,21 @@ class SearchGuidedPPOConfig(BaseModel):
             ),
             "beam.archive_path_weight_mode": str(
                 self.beam_search.archive_path_weight_mode
+            ),
+            "beam.archive_neighbor_targets": bool(
+                self.beam_search.archive_neighbor_targets
+            ),
+            "beam.archive_neighbor_top_k": int(self.beam_search.archive_neighbor_top_k),
+            "beam.archive_neighbor_weight": float(
+                self.beam_search.archive_neighbor_weight
+            ),
+            "beam.archive_neighbor_max_rows_per_solve": (
+                None
+                if self.beam_search.archive_neighbor_max_rows_per_solve is None
+                else int(self.beam_search.archive_neighbor_max_rows_per_solve)
+            ),
+            "beam.archive_neighbor_exclude_path_action": bool(
+                self.beam_search.archive_neighbor_exclude_path_action
             ),
             "aux.updates_per_step": int(self.auxiliary.updates_per_step),
             "aux.demo_policy_coef": float(self.auxiliary.demo_policy_coef),

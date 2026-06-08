@@ -11,6 +11,8 @@ from pilgrim.schemas.rl import SearchGuidedPPOBeamSearchConfig, SearchGuidedPPOC
 
 ACTION_TOP_K = 4
 POLICY_PRESELECT_FACTOR = 2.0
+RECOVERY_NEIGHBOR_TOP_K = 4
+RECOVERY_NEIGHBOR_MAX_ROWS = 64
 
 
 class ForwardValueOnlyModel(torch.nn.Module):
@@ -87,3 +89,27 @@ def test_search_guided_ppo_topk_config_is_logged() -> None:
     assert log_dict["beam.policy_preselect_factor"] == pytest.approx(
         POLICY_PRESELECT_FACTOR
     )
+
+
+def test_search_guided_ppo_recovery_neighbor_config_is_logged() -> None:
+    """Check that recovery-neighbor archive settings are logged."""
+    config = SearchGuidedPPOConfig(
+        beam_search=SearchGuidedPPOBeamSearchConfig(
+            archive_neighbor_targets=True,
+            archive_neighbor_top_k=RECOVERY_NEIGHBOR_TOP_K,
+            archive_neighbor_weight=0.375,
+            archive_neighbor_max_rows_per_solve=RECOVERY_NEIGHBOR_MAX_ROWS,
+            archive_neighbor_exclude_path_action=False,
+        )
+    )
+
+    log_dict = config.to_log_dict()
+
+    assert log_dict["beam.archive_neighbor_targets"] is True
+    assert log_dict["beam.archive_neighbor_top_k"] == RECOVERY_NEIGHBOR_TOP_K
+    assert log_dict["beam.archive_neighbor_weight"] == pytest.approx(0.375)
+    assert (
+        log_dict["beam.archive_neighbor_max_rows_per_solve"]
+        == RECOVERY_NEIGHBOR_MAX_ROWS
+    )
+    assert log_dict["beam.archive_neighbor_exclude_path_action"] is False

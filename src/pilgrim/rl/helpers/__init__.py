@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+from .path_recovery_sampling import (
+    RecoveryNeighborRows,
+    sample_policy_recovery_neighbor_rows,
+)
 from .ppo import (
     PolicyActionEvaluation,
     PolicyValueOutput,
@@ -47,6 +51,7 @@ __all__ = [
     "BeamSearchTargetStats",
     "PolicyActionEvaluation",
     "PolicyValueOutput",
+    "RecoveryNeighborRows",
     "ReverseTrajectorySupervisionBatch",
     "apply_actions",
     "beam_action_reward_bonus",
@@ -70,6 +75,7 @@ __all__ = [
     "sample_n_step_transitions_from_random_walks",
     "sample_n_step_transitions_from_states",
     "sample_policy_actions",
+    "sample_policy_recovery_neighbor_rows",
     "sample_reverse_trajectory_supervision_from_random_walks",
     "state_values_from_q",
     "subsample_reverse_trajectory_batch",
