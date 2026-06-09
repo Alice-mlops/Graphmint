@@ -46,6 +46,7 @@ def test_sample_states_with_lengths_aligns_labels_to_rows() -> None:
     )
 
     assert int(sample.states.shape[0]) == int(sample.lengths.shape[0])
+    assert int(sample.states.shape[0]) == int(sample.steps.shape[0])
     assert set(sample.lengths.tolist()) == {SHORT_LENGTH, LONG_LENGTH}
     assert int(torch.sum(sample.lengths == SHORT_LENGTH).item()) == (
         int(RW_WIDTH * FULL_FACTOR) * SHORT_LENGTH
@@ -53,3 +54,5 @@ def test_sample_states_with_lengths_aligns_labels_to_rows() -> None:
     assert int(torch.sum(sample.lengths == LONG_LENGTH).item()) == (
         int(RW_WIDTH * HALF_FACTOR) * LONG_LENGTH
     )
+    assert int(sample.steps.min().item()) >= 0
+    assert int(sample.steps.max().item()) <= LONG_LENGTH

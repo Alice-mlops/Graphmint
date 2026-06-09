@@ -22,6 +22,7 @@ class RandomWalkStateSample:
 
     states: torch.Tensor
     lengths: torch.Tensor
+    steps: torch.Tensor
 
 
 def sample_states_from_random_walks(
@@ -71,12 +72,13 @@ def sample_states_with_lengths_from_random_walks(
     schedule = resolve_rw_schedule(config)
     states: list[torch.Tensor] = []
     lengths: list[torch.Tensor] = []
+    steps: list[torch.Tensor] = []
 
     for factor, length in schedule:
         if int(length) < 1:
             continue
         width = max(1, int(int(config.rw_width) * float(factor)))
-        x_part, _ = graph.random_walks(
+        x_part, step_part = graph.random_walks(
             width=width,
             length=int(length),
             mode=str(config.rw_mode),
@@ -90,9 +92,16 @@ def sample_states_with_lengths_from_random_walks(
                 row_count=int(state_part.shape[0]),
             )
         )
+        steps.append(
+            _steps_for_state_rows(
+                fallback_length=int(length),
+                row_count=int(state_part.shape[0]),
+                raw_steps=step_part,
+            )
+        )
 
     if not states:
-        x_part, _ = graph.random_walks(
+        x_part, step_part = graph.random_walks(
             width=int(config.rw_width),
             length=int(config.rw_length),
             mode=str(config.rw_mode),
@@ -106,10 +115,18 @@ def sample_states_with_lengths_from_random_walks(
                 row_count=int(state_part.shape[0]),
             )
         )
+        steps.append(
+            _steps_for_state_rows(
+                fallback_length=int(config.rw_length),
+                row_count=int(state_part.shape[0]),
+                raw_steps=step_part,
+            )
+        )
 
     return RandomWalkStateSample(
         states=torch.cat(states, dim=0),
         lengths=torch.cat(lengths, dim=0),
+        steps=torch.cat(steps, dim=0),
     )
 
 
@@ -128,6 +145,33 @@ def _lengths_for_state_rows(
     Returns:
         One-dimensional length tensor aligned with state rows.
     """
+    return torch.full(
+        (int(row_count),),
+        fill_value=int(fallback_length),
+        dtype=torch.long,
+    )
+
+
+def _steps_for_state_rows(
+    *,
+    fallback_length: int,
+    row_count: int,
+    raw_steps: object,
+) -> torch.Tensor:
+    """
+    Build actual random-walk step labels for sampled state rows.
+
+    Args:
+        fallback_length: Configured random-walk length for missing labels.
+        row_count: Number of sampled state rows.
+        raw_steps: Step labels returned by ``CayleyGraph.random_walks``.
+
+    Returns:
+        One-dimensional step tensor aligned with state rows.
+    """
+    steps = torch.as_tensor(raw_steps).reshape(-1).long()
+    if int(steps.numel()) == int(row_count):
+        return steps
     return torch.full(
         (int(row_count),),
         fill_value=int(fallback_length),

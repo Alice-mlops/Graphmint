@@ -585,6 +585,12 @@ class SearchGuidedPPOStepDiagnostics(BaseModel):
             sampled rollout starts.
         rollout_start_rw_length_max: Maximum configured random-walk length for
             sampled rollout starts.
+        rollout_start_rw_step_mean: Mean actual random-walk step for sampled
+            rollout starts.
+        rollout_start_rw_step_min: Minimum actual random-walk step for sampled
+            rollout starts.
+        rollout_start_rw_step_max: Maximum actual random-walk step for sampled
+            rollout starts.
         demo_archive_size: Number of rows stored in the demo archive.
         search_archive_size: Number of rows stored in the search archive.
         beam_rollout_queries: Number of beam-search queries for rollout-start
@@ -659,6 +665,9 @@ class SearchGuidedPPOStepDiagnostics(BaseModel):
     rollout_start_rw_length_mean: float = 0.0
     rollout_start_rw_length_min: float = 0.0
     rollout_start_rw_length_max: float = 0.0
+    rollout_start_rw_step_mean: float = 0.0
+    rollout_start_rw_step_min: float = 0.0
+    rollout_start_rw_step_max: float = 0.0
     demo_archive_size: int = Field(..., ge=0)
     search_archive_size: int = Field(..., ge=0)
     beam_rollout_queries: int = Field(..., ge=0)

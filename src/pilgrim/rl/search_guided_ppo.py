@@ -112,6 +112,9 @@ class _RolloutSummary:
     rollout_start_rw_length_mean: float
     rollout_start_rw_length_min: float
     rollout_start_rw_length_max: float
+    rollout_start_rw_step_mean: float
+    rollout_start_rw_step_min: float
+    rollout_start_rw_step_max: float
     beam_rollout_queries: int
     beam_rollout_successes: int
     beam_rollout_rows_added: int
@@ -243,6 +246,7 @@ class SearchGuidedPPOTrainer:
         self._rollout_generator = torch.Generator(device="cpu")
         self._rollout_generator.manual_seed(int(self.config.seed))
         self._last_rollout_start_lengths = torch.empty(0, dtype=torch.long)
+        self._last_rollout_start_steps = torch.empty(0, dtype=torch.long)
 
         self.demo_archive = (
             None
@@ -353,6 +357,11 @@ class SearchGuidedPPOTrainer:
             rollout_start_rw_length_max = float(
                 rollout_summary.rollout_start_rw_length_max
             )
+            rollout_start_rw_step_mean = float(
+                rollout_summary.rollout_start_rw_step_mean
+            )
+            rollout_start_rw_step_min = float(rollout_summary.rollout_start_rw_step_min)
+            rollout_start_rw_step_max = float(rollout_summary.rollout_start_rw_step_max)
             beam_rollout_retry_attempts = int(
                 rollout_summary.beam_rollout_retry_attempts
             )
@@ -441,6 +450,10 @@ class SearchGuidedPPOTrainer:
             )
             rollout_start_rw_length_min = _tensor_stat(rollout_lengths, stat="min")
             rollout_start_rw_length_max = _tensor_stat(rollout_lengths, stat="max")
+            rollout_steps = self._last_rollout_start_steps
+            rollout_start_rw_step_mean = _tensor_stat(rollout_steps, stat="mean")
+            rollout_start_rw_step_min = _tensor_stat(rollout_steps, stat="min")
+            rollout_start_rw_step_max = _tensor_stat(rollout_steps, stat="max")
             beam_rollout_retry_attempts = 0
             beam_rollout_target_queries = 0
             beam_rollout_target_successes = 0
@@ -529,6 +542,9 @@ class SearchGuidedPPOTrainer:
             rollout_start_rw_length_mean=rollout_start_rw_length_mean,
             rollout_start_rw_length_min=rollout_start_rw_length_min,
             rollout_start_rw_length_max=rollout_start_rw_length_max,
+            rollout_start_rw_step_mean=rollout_start_rw_step_mean,
+            rollout_start_rw_step_min=rollout_start_rw_step_min,
+            rollout_start_rw_step_max=rollout_start_rw_step_max,
             demo_archive_size=0
             if self.demo_archive is None
             else len(self.demo_archive),
@@ -616,6 +632,7 @@ class SearchGuidedPPOTrainer:
         try:
             start_states = self._sample_rollout_start_states()
             start_lengths = self._last_rollout_start_lengths.detach().cpu()
+            start_steps = self._last_rollout_start_steps.detach().cpu()
             num_envs = int(self.config.rollout.num_envs)
             rollout_buffer = PolicyRolloutBuffer(
                 num_envs=num_envs,
@@ -858,6 +875,9 @@ class SearchGuidedPPOTrainer:
                 rollout_start_rw_length_mean=_tensor_stat(start_lengths, stat="mean"),
                 rollout_start_rw_length_min=_tensor_stat(start_lengths, stat="min"),
                 rollout_start_rw_length_max=_tensor_stat(start_lengths, stat="max"),
+                rollout_start_rw_step_mean=_tensor_stat(start_steps, stat="mean"),
+                rollout_start_rw_step_min=_tensor_stat(start_steps, stat="min"),
+                rollout_start_rw_step_max=_tensor_stat(start_steps, stat="max"),
                 beam_rollout_queries=int(rollout_target_stats.queried),
                 beam_rollout_successes=int(rollout_target_stats.path_found),
                 beam_rollout_rows_added=int(rollout_target_stats.rows_added),
@@ -933,12 +953,14 @@ class SearchGuidedPPOTrainer:
             target_queries = 0
             target_successes = 0
             selected_start_lengths = torch.empty(0, dtype=torch.long)
+            selected_start_steps = torch.empty(0, dtype=torch.long)
             selected_target_stats = BeamSearchTargetStats(0, 0, 0, None)
             retry_attempts_used = 0
             for _ in range(int(self.config.rollout.beam_retry_attempts)):
                 retry_attempts_used += 1
                 start_states = self._sample_rollout_start_states()
                 attempt_start_lengths = self._last_rollout_start_lengths.detach().cpu()
+                attempt_start_steps = self._last_rollout_start_steps.detach().cpu()
                 candidate_set, target_stats = collect_beam_search_targets(
                     self.graph,
                     self.model,
@@ -952,6 +974,7 @@ class SearchGuidedPPOTrainer:
                 if candidate_set is not None and len(candidate_set.batch) > 0:
                     target_set = candidate_set
                     selected_start_lengths = attempt_start_lengths
+                    selected_start_steps = attempt_start_steps
                     selected_target_stats = target_stats
                     break
             if target_set is None or len(target_set.batch) == 0:
@@ -1070,6 +1093,18 @@ class SearchGuidedPPOTrainer:
                 ),
                 rollout_start_rw_length_max=_tensor_stat(
                     selected_start_lengths,
+                    stat="max",
+                ),
+                rollout_start_rw_step_mean=_tensor_stat(
+                    selected_start_steps,
+                    stat="mean",
+                ),
+                rollout_start_rw_step_min=_tensor_stat(
+                    selected_start_steps,
+                    stat="min",
+                ),
+                rollout_start_rw_step_max=_tensor_stat(
+                    selected_start_steps,
                     stat="max",
                 ),
                 beam_rollout_retry_attempts=int(retry_attempts_used),
@@ -1577,20 +1612,28 @@ class SearchGuidedPPOTrainer:
         self._start_state_sample_index += 1
         sampled = torch.as_tensor(sampled_batch.states).long().cpu()
         sampled_lengths = torch.as_tensor(sampled_batch.lengths).long().cpu()
+        sampled_steps = torch.as_tensor(sampled_batch.steps).long().cpu()
         if sampled.ndim == 1:
             sampled = sampled.unsqueeze(0)
         if sampled_lengths.ndim != 1:
             sampled_lengths = sampled_lengths.reshape(-1)
+        if sampled_steps.ndim != 1:
+            sampled_steps = sampled_steps.reshape(-1)
         num_envs = int(self.config.rollout.num_envs)
         if int(sampled.shape[0]) < num_envs:
             repeats = (num_envs + int(sampled.shape[0]) - 1) // int(sampled.shape[0])
             sampled = sampled.repeat((repeats, 1))
             sampled_lengths = sampled_lengths.repeat(repeats)
+            sampled_steps = sampled_steps.repeat(repeats)
         permutation = torch.randperm(
             int(sampled.shape[0]),
             generator=self._rollout_generator,
         )[:num_envs]
         self._last_rollout_start_lengths = sampled_lengths.index_select(
+            0,
+            permutation,
+        ).cpu()
+        self._last_rollout_start_steps = sampled_steps.index_select(
             0,
             permutation,
         ).cpu()
