@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import random
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -13,6 +14,14 @@ from cayleypy import CayleyGraph
 from pilgrim.schemas.rl import TDRandomWalkSamplingConfig
 
 from .config import RandomWalkSamplingConfig
+
+
+@dataclass(frozen=True)
+class RandomWalkStateSample:
+    """States sampled from random walks with aligned walk-length labels."""
+
+    states: torch.Tensor
+    lengths: torch.Tensor
 
 
 def sample_states_from_random_walks(
@@ -33,9 +42,35 @@ def sample_states_from_random_walks(
         Tensor of sampled states with shape ``(batch, state_size)``.
 
     """
+    return sample_states_with_lengths_from_random_walks(
+        graph,
+        config,
+        sample_index=sample_index,
+    ).states
+
+
+def sample_states_with_lengths_from_random_walks(
+    graph: CayleyGraph,
+    config: RandomWalkSamplingConfig | TDRandomWalkSamplingConfig,
+    *,
+    sample_index: int = 0,
+) -> RandomWalkStateSample:
+    """
+    Sample states from random walks and retain aligned source walk lengths.
+
+    Args:
+        graph: Cayley graph used to generate random walks.
+        config: Random-walk sampling configuration.
+        sample_index: Sampling-call index used to derive a deterministic seed.
+
+    Returns:
+        Sampled states plus one length label per returned state row.
+
+    """
     _set_sampling_seed(base_seed=int(config.seed), sample_index=sample_index)
     schedule = resolve_rw_schedule(config)
     states: list[torch.Tensor] = []
+    lengths: list[torch.Tensor] = []
 
     for factor, length in schedule:
         if int(length) < 1:
@@ -47,7 +82,14 @@ def sample_states_from_random_walks(
             mode=str(config.rw_mode),
             nbt_history_depth=int(length),
         )
-        states.append(torch.as_tensor(x_part).long())
+        state_part = torch.as_tensor(x_part).long()
+        states.append(state_part)
+        lengths.append(
+            _lengths_for_state_rows(
+                fallback_length=int(length),
+                row_count=int(state_part.shape[0]),
+            )
+        )
 
     if not states:
         x_part, _ = graph.random_walks(
@@ -56,9 +98,41 @@ def sample_states_from_random_walks(
             mode=str(config.rw_mode),
             nbt_history_depth=int(config.rw_length),
         )
-        states.append(torch.as_tensor(x_part).long())
+        state_part = torch.as_tensor(x_part).long()
+        states.append(state_part)
+        lengths.append(
+            _lengths_for_state_rows(
+                fallback_length=int(config.rw_length),
+                row_count=int(state_part.shape[0]),
+            )
+        )
 
-    return torch.cat(states, dim=0)
+    return RandomWalkStateSample(
+        states=torch.cat(states, dim=0),
+        lengths=torch.cat(lengths, dim=0),
+    )
+
+
+def _lengths_for_state_rows(
+    *,
+    fallback_length: int,
+    row_count: int,
+) -> torch.Tensor:
+    """
+    Build fallback walk-length labels for sampled state rows.
+
+    Args:
+        fallback_length: Configured random-walk length for the sample block.
+        row_count: Number of sampled state rows.
+
+    Returns:
+        One-dimensional length tensor aligned with state rows.
+    """
+    return torch.full(
+        (int(row_count),),
+        fill_value=int(fallback_length),
+        dtype=torch.long,
+    )
 
 
 def sample_suffix_states_from_random_walks(

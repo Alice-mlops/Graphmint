@@ -45,12 +45,55 @@ from .helpers.trajectory_supervision import (
     sample_reverse_trajectory_supervision_from_random_walks,
 )
 from .rollout_buffer import PolicyRolloutBatch, PolicyRolloutBuffer
-from .sampling import sample_states_from_random_walks
+from .sampling import sample_states_with_lengths_from_random_walks
 from .search_guided_ppo_tracking import SearchGuidedPPOTracker
 from .supervision_archive import PolicySupervisionArchive, PolicySupervisionBatch
 from .transitions import central_state_mask
 
 _ZERO_EPS = 1e-12
+
+
+def _float_or_zero(value: float | None) -> float:
+    """
+    Convert optional diagnostic values into CSV-friendly floats.
+
+    Args:
+        value: Optional floating-point statistic.
+
+    Returns:
+        ``value`` as ``float`` when present, otherwise ``0.0``.
+    """
+    return 0.0 if value is None else float(value)
+
+
+def _tensor_stat(values: torch.Tensor, *, stat: str) -> float:
+    """
+    Compute a scalar statistic for one-dimensional diagnostics.
+
+    Args:
+        values: Tensor of numeric diagnostic values.
+        stat: Statistic name: ``mean``, ``min``, ``max``, ``p50``, or ``p90``.
+
+    Returns:
+        Requested statistic, or ``0.0`` for an empty tensor.
+
+    Raises:
+        ValueError: If ``stat`` is unknown.
+    """
+    data = torch.as_tensor(values, dtype=torch.float32).reshape(-1)
+    if int(data.numel()) == 0:
+        return 0.0
+    if stat == "mean":
+        return float(data.mean().item())
+    if stat == "min":
+        return float(data.min().item())
+    if stat == "max":
+        return float(data.max().item())
+    if stat == "p50":
+        return float(torch.quantile(data, 0.5).item())
+    if stat == "p90":
+        return float(torch.quantile(data, 0.9).item())
+    raise ValueError(f"Unknown tensor statistic: {stat!r}.")
 
 
 @dataclass(slots=True)
@@ -66,12 +109,36 @@ class _RolloutSummary:
     reward_inverse_penalty_mean: float
     reward_revisit_penalty_mean: float
     reward_search_bonus_mean: float
+    rollout_start_rw_length_mean: float
+    rollout_start_rw_length_min: float
+    rollout_start_rw_length_max: float
     beam_rollout_queries: int
     beam_rollout_successes: int
     beam_rollout_rows_added: int
     beam_archive_queries: int
     beam_archive_successes: int
     beam_archive_rows_added: int
+    beam_rollout_retry_attempts: int
+    beam_rollout_target_queries: int
+    beam_rollout_target_successes: int
+    beam_rollout_target_rows_added: int
+    beam_rollout_action_eval_queries: int
+    beam_rollout_action_eval_successes: int
+    beam_rollout_target_path_length_mean: float
+    beam_rollout_target_path_length_min: float
+    beam_rollout_target_path_length_p50: float
+    beam_rollout_target_path_length_p90: float
+    beam_rollout_target_path_length_max: float
+    beam_rollout_kept_cost_mean: float
+    beam_rollout_kept_cost_min: float
+    beam_rollout_kept_cost_p50: float
+    beam_rollout_kept_cost_p90: float
+    beam_rollout_kept_cost_max: float
+    beam_archive_target_path_length_mean: float
+    beam_archive_target_path_length_min: float
+    beam_archive_target_path_length_p50: float
+    beam_archive_target_path_length_p90: float
+    beam_archive_target_path_length_max: float
 
 
 @dataclass(slots=True)
@@ -175,6 +242,7 @@ class SearchGuidedPPOTrainer:
         self._archive_sample_index = 0
         self._rollout_generator = torch.Generator(device="cpu")
         self._rollout_generator.manual_seed(int(self.config.seed))
+        self._last_rollout_start_lengths = torch.empty(0, dtype=torch.long)
 
         self.demo_archive = (
             None
@@ -276,6 +344,78 @@ class SearchGuidedPPOTrainer:
             beam_archive_queries = int(rollout_summary.beam_archive_queries)
             beam_archive_successes = int(rollout_summary.beam_archive_successes)
             beam_archive_rows_added = int(rollout_summary.beam_archive_rows_added)
+            rollout_start_rw_length_mean = float(
+                rollout_summary.rollout_start_rw_length_mean
+            )
+            rollout_start_rw_length_min = float(
+                rollout_summary.rollout_start_rw_length_min
+            )
+            rollout_start_rw_length_max = float(
+                rollout_summary.rollout_start_rw_length_max
+            )
+            beam_rollout_retry_attempts = int(
+                rollout_summary.beam_rollout_retry_attempts
+            )
+            beam_rollout_target_queries = int(
+                rollout_summary.beam_rollout_target_queries
+            )
+            beam_rollout_target_successes = int(
+                rollout_summary.beam_rollout_target_successes
+            )
+            beam_rollout_target_rows_added = int(
+                rollout_summary.beam_rollout_target_rows_added
+            )
+            beam_rollout_action_eval_queries = int(
+                rollout_summary.beam_rollout_action_eval_queries
+            )
+            beam_rollout_action_eval_successes = int(
+                rollout_summary.beam_rollout_action_eval_successes
+            )
+            beam_rollout_target_path_length_mean = float(
+                rollout_summary.beam_rollout_target_path_length_mean
+            )
+            beam_rollout_target_path_length_min = float(
+                rollout_summary.beam_rollout_target_path_length_min
+            )
+            beam_rollout_target_path_length_p50 = float(
+                rollout_summary.beam_rollout_target_path_length_p50
+            )
+            beam_rollout_target_path_length_p90 = float(
+                rollout_summary.beam_rollout_target_path_length_p90
+            )
+            beam_rollout_target_path_length_max = float(
+                rollout_summary.beam_rollout_target_path_length_max
+            )
+            beam_rollout_kept_cost_mean = float(
+                rollout_summary.beam_rollout_kept_cost_mean
+            )
+            beam_rollout_kept_cost_min = float(
+                rollout_summary.beam_rollout_kept_cost_min
+            )
+            beam_rollout_kept_cost_p50 = float(
+                rollout_summary.beam_rollout_kept_cost_p50
+            )
+            beam_rollout_kept_cost_p90 = float(
+                rollout_summary.beam_rollout_kept_cost_p90
+            )
+            beam_rollout_kept_cost_max = float(
+                rollout_summary.beam_rollout_kept_cost_max
+            )
+            beam_archive_target_path_length_mean = float(
+                rollout_summary.beam_archive_target_path_length_mean
+            )
+            beam_archive_target_path_length_min = float(
+                rollout_summary.beam_archive_target_path_length_min
+            )
+            beam_archive_target_path_length_p50 = float(
+                rollout_summary.beam_archive_target_path_length_p50
+            )
+            beam_archive_target_path_length_p90 = float(
+                rollout_summary.beam_archive_target_path_length_p90
+            )
+            beam_archive_target_path_length_max = float(
+                rollout_summary.beam_archive_target_path_length_max
+            )
         else:
             archive_target_stats = self._refresh_search_archive_from_sampled_states()
             rollout_summary = None
@@ -294,6 +434,44 @@ class SearchGuidedPPOTrainer:
             beam_archive_queries = int(archive_target_stats.queried)
             beam_archive_successes = int(archive_target_stats.path_found)
             beam_archive_rows_added = int(archive_target_stats.rows_added)
+            rollout_lengths = self._last_rollout_start_lengths
+            rollout_start_rw_length_mean = _tensor_stat(
+                rollout_lengths,
+                stat="mean",
+            )
+            rollout_start_rw_length_min = _tensor_stat(rollout_lengths, stat="min")
+            rollout_start_rw_length_max = _tensor_stat(rollout_lengths, stat="max")
+            beam_rollout_retry_attempts = 0
+            beam_rollout_target_queries = 0
+            beam_rollout_target_successes = 0
+            beam_rollout_target_rows_added = 0
+            beam_rollout_action_eval_queries = 0
+            beam_rollout_action_eval_successes = 0
+            beam_rollout_target_path_length_mean = 0.0
+            beam_rollout_target_path_length_min = 0.0
+            beam_rollout_target_path_length_p50 = 0.0
+            beam_rollout_target_path_length_p90 = 0.0
+            beam_rollout_target_path_length_max = 0.0
+            beam_rollout_kept_cost_mean = 0.0
+            beam_rollout_kept_cost_min = 0.0
+            beam_rollout_kept_cost_p50 = 0.0
+            beam_rollout_kept_cost_p90 = 0.0
+            beam_rollout_kept_cost_max = 0.0
+            beam_archive_target_path_length_mean = _float_or_zero(
+                archive_target_stats.mean_path_length
+            )
+            beam_archive_target_path_length_min = _float_or_zero(
+                archive_target_stats.path_length_min
+            )
+            beam_archive_target_path_length_p50 = _float_or_zero(
+                archive_target_stats.path_length_p50
+            )
+            beam_archive_target_path_length_p90 = _float_or_zero(
+                archive_target_stats.path_length_p90
+            )
+            beam_archive_target_path_length_max = _float_or_zero(
+                archive_target_stats.path_length_max
+            )
         rollout_collect_time_s = time.perf_counter() - rollout_started
 
         optimize_started = time.perf_counter()
@@ -348,6 +526,9 @@ class SearchGuidedPPOTrainer:
             reward_inverse_penalty_mean=reward_inverse_penalty_mean,
             reward_revisit_penalty_mean=reward_revisit_penalty_mean,
             reward_search_bonus_mean=reward_search_bonus_mean,
+            rollout_start_rw_length_mean=rollout_start_rw_length_mean,
+            rollout_start_rw_length_min=rollout_start_rw_length_min,
+            rollout_start_rw_length_max=rollout_start_rw_length_max,
             demo_archive_size=0
             if self.demo_archive is None
             else len(self.demo_archive),
@@ -360,6 +541,35 @@ class SearchGuidedPPOTrainer:
             beam_archive_queries=beam_archive_queries,
             beam_archive_successes=beam_archive_successes,
             beam_archive_rows_added=beam_archive_rows_added,
+            beam_rollout_retry_attempts=beam_rollout_retry_attempts,
+            beam_rollout_target_queries=beam_rollout_target_queries,
+            beam_rollout_target_successes=beam_rollout_target_successes,
+            beam_rollout_target_failures=max(
+                0,
+                beam_rollout_target_queries - beam_rollout_target_successes,
+            ),
+            beam_rollout_target_rows_added=beam_rollout_target_rows_added,
+            beam_rollout_action_eval_queries=beam_rollout_action_eval_queries,
+            beam_rollout_action_eval_successes=beam_rollout_action_eval_successes,
+            beam_rollout_action_eval_failures=max(
+                0,
+                beam_rollout_action_eval_queries - beam_rollout_action_eval_successes,
+            ),
+            beam_rollout_target_path_length_mean=(beam_rollout_target_path_length_mean),
+            beam_rollout_target_path_length_min=(beam_rollout_target_path_length_min),
+            beam_rollout_target_path_length_p50=(beam_rollout_target_path_length_p50),
+            beam_rollout_target_path_length_p90=(beam_rollout_target_path_length_p90),
+            beam_rollout_target_path_length_max=(beam_rollout_target_path_length_max),
+            beam_rollout_kept_cost_mean=beam_rollout_kept_cost_mean,
+            beam_rollout_kept_cost_min=beam_rollout_kept_cost_min,
+            beam_rollout_kept_cost_p50=beam_rollout_kept_cost_p50,
+            beam_rollout_kept_cost_p90=beam_rollout_kept_cost_p90,
+            beam_rollout_kept_cost_max=beam_rollout_kept_cost_max,
+            beam_archive_target_path_length_mean=(beam_archive_target_path_length_mean),
+            beam_archive_target_path_length_min=(beam_archive_target_path_length_min),
+            beam_archive_target_path_length_p50=(beam_archive_target_path_length_p50),
+            beam_archive_target_path_length_p90=(beam_archive_target_path_length_p90),
+            beam_archive_target_path_length_max=(beam_archive_target_path_length_max),
         )
         return metrics, diagnostics
 
@@ -405,6 +615,7 @@ class SearchGuidedPPOTrainer:
         self.model.eval()
         try:
             start_states = self._sample_rollout_start_states()
+            start_lengths = self._last_rollout_start_lengths.detach().cpu()
             num_envs = int(self.config.rollout.num_envs)
             rollout_buffer = PolicyRolloutBuffer(
                 num_envs=num_envs,
@@ -644,17 +855,61 @@ class SearchGuidedPPOTrainer:
                     reward_component_sums["search_bonus"],
                     valid_transition_count,
                 ),
+                rollout_start_rw_length_mean=_tensor_stat(start_lengths, stat="mean"),
+                rollout_start_rw_length_min=_tensor_stat(start_lengths, stat="min"),
+                rollout_start_rw_length_max=_tensor_stat(start_lengths, stat="max"),
                 beam_rollout_queries=int(rollout_target_stats.queried),
                 beam_rollout_successes=int(rollout_target_stats.path_found),
                 beam_rollout_rows_added=int(rollout_target_stats.rows_added),
                 beam_archive_queries=int(archive_target_stats.queried),
                 beam_archive_successes=int(archive_target_stats.path_found),
                 beam_archive_rows_added=int(archive_target_stats.rows_added),
+                beam_rollout_retry_attempts=1,
+                beam_rollout_target_queries=int(rollout_target_stats.queried),
+                beam_rollout_target_successes=int(rollout_target_stats.path_found),
+                beam_rollout_target_rows_added=int(rollout_target_stats.rows_added),
+                beam_rollout_action_eval_queries=0,
+                beam_rollout_action_eval_successes=0,
+                beam_rollout_target_path_length_mean=_float_or_zero(
+                    rollout_target_stats.mean_path_length
+                ),
+                beam_rollout_target_path_length_min=_float_or_zero(
+                    rollout_target_stats.path_length_min
+                ),
+                beam_rollout_target_path_length_p50=_float_or_zero(
+                    rollout_target_stats.path_length_p50
+                ),
+                beam_rollout_target_path_length_p90=_float_or_zero(
+                    rollout_target_stats.path_length_p90
+                ),
+                beam_rollout_target_path_length_max=_float_or_zero(
+                    rollout_target_stats.path_length_max
+                ),
+                beam_rollout_kept_cost_mean=0.0,
+                beam_rollout_kept_cost_min=0.0,
+                beam_rollout_kept_cost_p50=0.0,
+                beam_rollout_kept_cost_p90=0.0,
+                beam_rollout_kept_cost_max=0.0,
+                beam_archive_target_path_length_mean=_float_or_zero(
+                    archive_target_stats.mean_path_length
+                ),
+                beam_archive_target_path_length_min=_float_or_zero(
+                    archive_target_stats.path_length_min
+                ),
+                beam_archive_target_path_length_p50=_float_or_zero(
+                    archive_target_stats.path_length_p50
+                ),
+                beam_archive_target_path_length_p90=_float_or_zero(
+                    archive_target_stats.path_length_p90
+                ),
+                beam_archive_target_path_length_max=_float_or_zero(
+                    archive_target_stats.path_length_max
+                ),
             )
         finally:
             self.model.train(was_training)
 
-    def collect_beam_evaluated_rollout(self) -> _RolloutSummary:  # noqa: PLR0914
+    def collect_beam_evaluated_rollout(self) -> _RolloutSummary:  # noqa: PLR0914, PLR0915
         """
         Collect masked PPO rows from beam-solved path states.
 
@@ -677,8 +932,13 @@ class SearchGuidedPPOTrainer:
             target_set: BeamSearchTargetSet | None = None
             target_queries = 0
             target_successes = 0
+            selected_start_lengths = torch.empty(0, dtype=torch.long)
+            selected_target_stats = BeamSearchTargetStats(0, 0, 0, None)
+            retry_attempts_used = 0
             for _ in range(int(self.config.rollout.beam_retry_attempts)):
+                retry_attempts_used += 1
                 start_states = self._sample_rollout_start_states()
+                attempt_start_lengths = self._last_rollout_start_lengths.detach().cpu()
                 candidate_set, target_stats = collect_beam_search_targets(
                     self.graph,
                     self.model,
@@ -691,6 +951,8 @@ class SearchGuidedPPOTrainer:
                 target_successes += int(target_stats.path_found)
                 if candidate_set is not None and len(candidate_set.batch) > 0:
                     target_set = candidate_set
+                    selected_start_lengths = attempt_start_lengths
+                    selected_target_stats = target_stats
                     break
             if target_set is None or len(target_set.batch) == 0:
                 raise RuntimeError(
@@ -798,6 +1060,49 @@ class SearchGuidedPPOTrainer:
                 beam_archive_queries=0,
                 beam_archive_successes=0,
                 beam_archive_rows_added=0,
+                rollout_start_rw_length_mean=_tensor_stat(
+                    selected_start_lengths,
+                    stat="mean",
+                ),
+                rollout_start_rw_length_min=_tensor_stat(
+                    selected_start_lengths,
+                    stat="min",
+                ),
+                rollout_start_rw_length_max=_tensor_stat(
+                    selected_start_lengths,
+                    stat="max",
+                ),
+                beam_rollout_retry_attempts=int(retry_attempts_used),
+                beam_rollout_target_queries=int(target_queries),
+                beam_rollout_target_successes=int(target_successes),
+                beam_rollout_target_rows_added=len(target_set.batch),
+                beam_rollout_action_eval_queries=int(cost_result.queried),
+                beam_rollout_action_eval_successes=int(cost_result.path_found),
+                beam_rollout_target_path_length_mean=_float_or_zero(
+                    selected_target_stats.mean_path_length
+                ),
+                beam_rollout_target_path_length_min=_float_or_zero(
+                    selected_target_stats.path_length_min
+                ),
+                beam_rollout_target_path_length_p50=_float_or_zero(
+                    selected_target_stats.path_length_p50
+                ),
+                beam_rollout_target_path_length_p90=_float_or_zero(
+                    selected_target_stats.path_length_p90
+                ),
+                beam_rollout_target_path_length_max=_float_or_zero(
+                    selected_target_stats.path_length_max
+                ),
+                beam_rollout_kept_cost_mean=_tensor_stat(kept_costs, stat="mean"),
+                beam_rollout_kept_cost_min=_tensor_stat(kept_costs, stat="min"),
+                beam_rollout_kept_cost_p50=_tensor_stat(kept_costs, stat="p50"),
+                beam_rollout_kept_cost_p90=_tensor_stat(kept_costs, stat="p90"),
+                beam_rollout_kept_cost_max=_tensor_stat(kept_costs, stat="max"),
+                beam_archive_target_path_length_mean=0.0,
+                beam_archive_target_path_length_min=0.0,
+                beam_archive_target_path_length_p50=0.0,
+                beam_archive_target_path_length_p90=0.0,
+                beam_archive_target_path_length_max=0.0,
             )
         finally:
             self.model.train(was_training)
@@ -1264,23 +1569,31 @@ class SearchGuidedPPOTrainer:
             Tensor of shape ``(num_envs, state_size)`` on ``self.device``.
 
         """
-        sampled = sample_states_from_random_walks(
+        sampled_batch = sample_states_with_lengths_from_random_walks(
             self.graph,
             self.config.rollout.sampling,
             sample_index=self._start_state_sample_index,
         )
         self._start_state_sample_index += 1
-        sampled = torch.as_tensor(sampled).long().cpu()
+        sampled = torch.as_tensor(sampled_batch.states).long().cpu()
+        sampled_lengths = torch.as_tensor(sampled_batch.lengths).long().cpu()
         if sampled.ndim == 1:
             sampled = sampled.unsqueeze(0)
+        if sampled_lengths.ndim != 1:
+            sampled_lengths = sampled_lengths.reshape(-1)
         num_envs = int(self.config.rollout.num_envs)
         if int(sampled.shape[0]) < num_envs:
             repeats = (num_envs + int(sampled.shape[0]) - 1) // int(sampled.shape[0])
             sampled = sampled.repeat((repeats, 1))
+            sampled_lengths = sampled_lengths.repeat(repeats)
         permutation = torch.randperm(
             int(sampled.shape[0]),
             generator=self._rollout_generator,
         )[:num_envs]
+        self._last_rollout_start_lengths = sampled_lengths.index_select(
+            0,
+            permutation,
+        ).cpu()
         return sampled.index_select(0, permutation).to(self.device)
 
     def _refresh_search_archive_from_sampled_states(self) -> BeamSearchTargetStats:

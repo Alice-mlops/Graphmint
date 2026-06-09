@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
@@ -49,7 +50,11 @@ class BeamSearchTargetStats:
         queried: Number of beam-search calls issued.
         path_found: Number of calls that found a path.
         rows_added: Number of supervision rows produced.
-        mean_path_length: Mean path length across found paths, if any.
+        mean_path_length: Mean source path length across found paths, if any.
+        path_length_min: Minimum source path length across found paths.
+        path_length_p50: Median source path length across found paths.
+        path_length_p90: P90 source path length across found paths.
+        path_length_max: Maximum source path length across found paths.
 
     """
 
@@ -57,6 +62,10 @@ class BeamSearchTargetStats:
     path_found: int
     rows_added: int
     mean_path_length: float | None
+    path_length_min: float | None = None
+    path_length_p50: float | None = None
+    path_length_p90: float | None = None
+    path_length_max: float | None = None
 
 
 class _AuxValuePredictor(nn.Module):
@@ -139,6 +148,7 @@ def collect_beam_search_targets(  # noqa: PLR0912, PLR0914, PLR0915
     weights: list[float] = []
     state_indices: list[int] = []
     path_lengths: list[int] = []
+    source_path_lengths: list[int] = []
     best_widths: list[int] = []
 
     queried = 0
@@ -197,6 +207,7 @@ def collect_beam_search_targets(  # noqa: PLR0912, PLR0914, PLR0915
                 path = [int(action) for action in list(best_result.path)]
                 if not path:
                     continue
+                source_path_lengths.append(int(best_result.path_length))
                 _append_beam_path_supervision(
                     graph=graph,
                     model=model,
@@ -239,9 +250,11 @@ def collect_beam_search_targets(  # noqa: PLR0912, PLR0914, PLR0915
             queried=queried,
             path_found=found,
             rows_added=len(batch),
-            mean_path_length=float(
-                torch.tensor(path_lengths, dtype=torch.float32).mean().item()
-            ),
+            mean_path_length=_path_length_mean(source_path_lengths),
+            path_length_min=_path_length_quantile(source_path_lengths, 0.0),
+            path_length_p50=_path_length_quantile(source_path_lengths, 0.5),
+            path_length_p90=_path_length_quantile(source_path_lengths, 0.9),
+            path_length_max=_path_length_quantile(source_path_lengths, 1.0),
         ),
     )
 
@@ -399,6 +412,51 @@ def _select_path_target_positions(
             selected.append(position)
         cursor += 1
     return sorted(selected)
+
+
+def _path_length_mean(values: list[int]) -> float | None:
+    """
+    Compute the arithmetic mean for path-length diagnostics.
+
+    Args:
+        values: Source path lengths.
+
+    Returns:
+        Mean path length, or ``None`` when no paths were found.
+    """
+    if not values:
+        return None
+    return float(sum(float(value) for value in values) / float(len(values)))
+
+
+def _path_length_quantile(values: list[int], quantile: float) -> float | None:
+    """
+    Compute a linearly interpolated path-length quantile.
+
+    Args:
+        values: Source path lengths.
+        quantile: Quantile in the inclusive range ``[0, 1]``.
+
+    Returns:
+        Quantile value, or ``None`` when no paths were found.
+
+    Raises:
+        ValueError: If ``quantile`` is outside ``[0, 1]``.
+    """
+    if not 0.0 <= float(quantile) <= 1.0:
+        raise ValueError("quantile must be in [0, 1].")
+    if not values:
+        return None
+    sorted_values = sorted(float(value) for value in values)
+    position = float(len(sorted_values) - 1) * float(quantile)
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return float(sorted_values[lower])
+    fraction = float(position) - float(lower)
+    return float(
+        sorted_values[lower] * (1.0 - fraction) + sorted_values[upper] * fraction
+    )
 
 
 def _build_topk_action_scorer(

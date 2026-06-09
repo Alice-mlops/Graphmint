@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 from cayleypy import CayleyGraph
 from cayleypy.graphs_lib import PermutationGroups
@@ -13,6 +14,13 @@ from pilgrim.rl.helpers.path_recovery_sampling import (
 )
 from pilgrim.rl.helpers.q_learning import apply_actions
 from pilgrim.schemas.rl import SearchGuidedPPOBeamSearchConfig
+
+PATH_LENGTH_VALUES = [10, 20, 40]
+PATH_LENGTH_MEAN = 70.0 / 3.0
+PATH_LENGTH_MIN = 10.0
+PATH_LENGTH_P50 = 20.0
+PATH_LENGTH_P90 = 36.0
+PATH_LENGTH_MAX = 40.0
 
 
 class FixedPolicyModel(torch.nn.Module):
@@ -68,6 +76,25 @@ def test_select_path_target_positions_applies_stride_and_even_cap() -> None:
     )
 
     assert positions == [0, 4, 8]
+
+
+def test_path_length_statistics_use_source_path_lengths() -> None:
+    """Path-length diagnostics should summarize source path lengths."""
+    assert search_guidance._path_length_mean(PATH_LENGTH_VALUES) == pytest.approx(
+        PATH_LENGTH_MEAN
+    )
+    assert search_guidance._path_length_quantile(
+        PATH_LENGTH_VALUES, 0.0
+    ) == pytest.approx(PATH_LENGTH_MIN)
+    assert search_guidance._path_length_quantile(
+        PATH_LENGTH_VALUES, 0.5
+    ) == pytest.approx(PATH_LENGTH_P50)
+    assert search_guidance._path_length_quantile(
+        PATH_LENGTH_VALUES, 0.9
+    ) == pytest.approx(PATH_LENGTH_P90)
+    assert search_guidance._path_length_quantile(
+        PATH_LENGTH_VALUES, 1.0
+    ) == pytest.approx(PATH_LENGTH_MAX)
 
 
 def test_path_expansion_adds_selected_intermediate_states() -> None:

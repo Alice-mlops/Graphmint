@@ -579,6 +579,12 @@ class SearchGuidedPPOStepDiagnostics(BaseModel):
         reward_inverse_penalty_mean: Mean inverse-action penalty contribution.
         reward_revisit_penalty_mean: Mean revisit-penalty contribution.
         reward_search_bonus_mean: Mean beam-guidance reward contribution.
+        rollout_start_rw_length_mean: Mean configured random-walk length for
+            sampled rollout starts.
+        rollout_start_rw_length_min: Minimum configured random-walk length for
+            sampled rollout starts.
+        rollout_start_rw_length_max: Maximum configured random-walk length for
+            sampled rollout starts.
         demo_archive_size: Number of rows stored in the demo archive.
         search_archive_size: Number of rows stored in the search archive.
         beam_rollout_queries: Number of beam-search queries for rollout-start
@@ -591,6 +597,39 @@ class SearchGuidedPPOStepDiagnostics(BaseModel):
         beam_archive_successes: Number of archive beam searches that returned a
             path.
         beam_archive_rows_added: Number of search-archive rows produced.
+        beam_rollout_retry_attempts: Number of random-walk batches tried before
+            a beam-evaluated rollout produced usable rows.
+        beam_rollout_target_queries: Number of beam searches used for rollout
+            source-state target collection, excluding off-path action checks.
+        beam_rollout_target_successes: Number of rollout source states solved
+            during target collection.
+        beam_rollout_target_failures: Number of rollout source states not
+            solved during target collection.
+        beam_rollout_target_rows_added: Number of path-expanded target rows
+            produced before PPO action sampling.
+        beam_rollout_action_eval_queries: Number of off-path sampled actions
+            evaluated by an additional beam search.
+        beam_rollout_action_eval_successes: Number of off-path sampled actions
+            solved by the additional beam search.
+        beam_rollout_action_eval_failures: Number of off-path sampled actions
+            not solved by the additional beam search.
+        beam_rollout_target_path_length_mean: Mean solved source path length
+            for rollout target collection.
+        beam_rollout_target_path_length_min: Minimum solved source path length.
+        beam_rollout_target_path_length_p50: Median solved source path length.
+        beam_rollout_target_path_length_p90: P90 solved source path length.
+        beam_rollout_target_path_length_max: Maximum solved source path length.
+        beam_rollout_kept_cost_mean: Mean cost label retained in the PPO batch.
+        beam_rollout_kept_cost_min: Minimum retained cost label.
+        beam_rollout_kept_cost_p50: Median retained cost label.
+        beam_rollout_kept_cost_p90: P90 retained cost label.
+        beam_rollout_kept_cost_max: Maximum retained cost label.
+        beam_archive_target_path_length_mean: Mean solved source path length
+            for archive target collection.
+        beam_archive_target_path_length_min: Minimum archive source path length.
+        beam_archive_target_path_length_p50: Median archive source path length.
+        beam_archive_target_path_length_p90: P90 archive source path length.
+        beam_archive_target_path_length_max: Maximum archive source path length.
 
     """
 
@@ -617,6 +656,9 @@ class SearchGuidedPPOStepDiagnostics(BaseModel):
     reward_inverse_penalty_mean: float
     reward_revisit_penalty_mean: float
     reward_search_bonus_mean: float
+    rollout_start_rw_length_mean: float = 0.0
+    rollout_start_rw_length_min: float = 0.0
+    rollout_start_rw_length_max: float = 0.0
     demo_archive_size: int = Field(..., ge=0)
     search_archive_size: int = Field(..., ge=0)
     beam_rollout_queries: int = Field(..., ge=0)
@@ -625,3 +667,26 @@ class SearchGuidedPPOStepDiagnostics(BaseModel):
     beam_archive_queries: int = Field(..., ge=0)
     beam_archive_successes: int = Field(..., ge=0)
     beam_archive_rows_added: int = Field(..., ge=0)
+    beam_rollout_retry_attempts: int = Field(0, ge=0)
+    beam_rollout_target_queries: int = Field(0, ge=0)
+    beam_rollout_target_successes: int = Field(0, ge=0)
+    beam_rollout_target_failures: int = Field(0, ge=0)
+    beam_rollout_target_rows_added: int = Field(0, ge=0)
+    beam_rollout_action_eval_queries: int = Field(0, ge=0)
+    beam_rollout_action_eval_successes: int = Field(0, ge=0)
+    beam_rollout_action_eval_failures: int = Field(0, ge=0)
+    beam_rollout_target_path_length_mean: float = 0.0
+    beam_rollout_target_path_length_min: float = 0.0
+    beam_rollout_target_path_length_p50: float = 0.0
+    beam_rollout_target_path_length_p90: float = 0.0
+    beam_rollout_target_path_length_max: float = 0.0
+    beam_rollout_kept_cost_mean: float = 0.0
+    beam_rollout_kept_cost_min: float = 0.0
+    beam_rollout_kept_cost_p50: float = 0.0
+    beam_rollout_kept_cost_p90: float = 0.0
+    beam_rollout_kept_cost_max: float = 0.0
+    beam_archive_target_path_length_mean: float = 0.0
+    beam_archive_target_path_length_min: float = 0.0
+    beam_archive_target_path_length_p50: float = 0.0
+    beam_archive_target_path_length_p90: float = 0.0
+    beam_archive_target_path_length_max: float = 0.0
