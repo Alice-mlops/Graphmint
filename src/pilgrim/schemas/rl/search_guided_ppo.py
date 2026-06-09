@@ -15,6 +15,7 @@ from .multistep_td_value_iteration import (
 from .parallel import TDParallelConfig
 
 BeamMode = Literal["simple", "advanced", "iterated", "topk", "policy_topk"]
+RolloutMode = Literal["policy", "beam_evaluated"]
 ActionSelectionMode = Literal["topk", "topp"]
 PathTargetWeightMode = Literal["uniform", "per_path_normalized"]
 
@@ -26,10 +27,16 @@ class SearchGuidedPPORolloutConfig(BaseModel):
     Args:
         enabled: Whether to collect on-policy PPO rollouts. Disable this for
             pure beam-search distillation updates.
+        mode: Rollout collector. ``"policy"`` samples raw policy actions;
+            ``"beam_evaluated"`` samples from a beam-approved candidate mask
+            and uses beam distances as cost returns.
         num_envs: Number of parallel rollout states collected per update.
         horizon: Number of rollout steps collected per update.
         max_episode_steps: Per-environment cutoff used during one rollout.
         action_temperature: Sampling temperature for the policy distribution.
+        beam_target_action_prob: Probability of sampling the beam-path target
+            action in ``"beam_evaluated"`` mode. The remaining probability mass
+            follows the masked policy distribution.
         generator_indices: Optional subset of legal generator ids.
         sampling: Random-walk sampling config used to draw rollout start states.
 
@@ -38,10 +45,12 @@ class SearchGuidedPPORolloutConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     enabled: bool = True
+    mode: RolloutMode = "policy"
     num_envs: int = Field(256, ge=1)
     horizon: int = Field(32, ge=1)
     max_episode_steps: int = Field(128, ge=1)
     action_temperature: float = Field(1.0, gt=0.0)
+    beam_target_action_prob: float = Field(0.0, ge=0.0, le=1.0)
     generator_indices: tuple[int, ...] | None = None
     sampling: TDRandomWalkSamplingConfig = Field(
         default_factory=TDRandomWalkSamplingConfig
@@ -328,7 +337,11 @@ class SearchGuidedPPOConfig(BaseModel):
         if self.parallel.uses_ddp:
             raise ValueError("SearchGuidedPPOTrainer does not support DDP yet.")
         rollout_rows = int(self.rollout.num_envs) * int(self.rollout.horizon)
-        if bool(self.rollout.enabled) and int(self.minibatch_size) > rollout_rows:
+        if (
+            bool(self.rollout.enabled)
+            and str(self.rollout.mode) == "policy"
+            and int(self.minibatch_size) > rollout_rows
+        ):
             raise ValueError(
                 "minibatch_size cannot exceed rollout.num_envs * rollout.horizon."
             )
@@ -369,10 +382,14 @@ class SearchGuidedPPOConfig(BaseModel):
             "lr_scheduler.t0": self.lr_scheduler.t0,
             "lr_scheduler.t_mult": self.lr_scheduler.t_mult,
             "rollout.enabled": bool(self.rollout.enabled),
+            "rollout.mode": str(self.rollout.mode),
             "rollout.num_envs": int(self.rollout.num_envs),
             "rollout.horizon": int(self.rollout.horizon),
             "rollout.max_episode_steps": int(self.rollout.max_episode_steps),
             "rollout.action_temperature": float(self.rollout.action_temperature),
+            "rollout.beam_target_action_prob": float(
+                self.rollout.beam_target_action_prob
+            ),
             "rollout.generator_indices": None
             if self.rollout.generator_indices is None
             else list(self.rollout.generator_indices),

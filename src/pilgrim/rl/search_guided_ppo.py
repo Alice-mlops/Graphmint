@@ -20,7 +20,9 @@ from pilgrim.schemas.rl.search_guided_ppo import (
 from pilgrim.utils.lr_scheduler_utils import lr_scheduler_ctor_from_cfg
 
 from .helpers.ppo import (
+    build_masked_action_candidates,
     compute_supervised_policy_value_losses,
+    evaluate_masked_policy_actions,
     evaluate_policy_actions,
     forward_policy_value,
     normalize_advantages,
@@ -64,6 +66,16 @@ class _RolloutSummary:
     beam_archive_queries: int
     beam_archive_successes: int
     beam_archive_rows_added: int
+
+
+@dataclass(slots=True)
+class _BeamActionCostResult:
+    """Internal cost labels for masked beam-evaluated actions."""
+
+    costs: torch.Tensor
+    solved_mask: torch.Tensor
+    queried: int
+    path_found: int
 
 
 class SearchGuidedPPOTrainer:
@@ -180,7 +192,7 @@ class SearchGuidedPPOTrainer:
             self.tracker.on_fit_end(self, history)
         return history
 
-    def train_step(  # noqa: PLR0914
+    def train_step(  # noqa: PLR0914, PLR0915
         self,
     ) -> tuple[SearchGuidedPPOMetrics, SearchGuidedPPOStepDiagnostics]:
         """
@@ -195,7 +207,10 @@ class SearchGuidedPPOTrainer:
 
         rollout_started = time.perf_counter()
         if bool(self.config.rollout.enabled):
-            rollout_summary = self.collect_rollout()
+            if str(self.config.rollout.mode) == "beam_evaluated":
+                rollout_summary = self.collect_beam_evaluated_rollout()
+            else:
+                rollout_summary = self.collect_rollout()
             rollout_size = len(rollout_summary.rollout_batch)
             solve_rate = float(rollout_summary.solve_rate)
             mean_reward = float(rollout_summary.mean_reward)
@@ -594,6 +609,267 @@ class SearchGuidedPPOTrainer:
         finally:
             self.model.train(was_training)
 
+    def collect_beam_evaluated_rollout(self) -> _RolloutSummary:  # noqa: PLR0914
+        """
+        Collect masked PPO rows from beam-solved path states.
+
+        Returns:
+            Internal summary containing a cost-style PPO rollout batch.
+
+        Raises:
+            RuntimeError: If beam search does not produce any usable rollout
+                row for this update.
+        """
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            start_states = self._sample_rollout_start_states()
+            rollout_beam_config = self.config.beam_search.model_copy(
+                update={
+                    "archive_path_targets": True,
+                    "archive_neighbor_targets": False,
+                },
+            )
+            target_set, target_stats = collect_beam_search_targets(
+                self.graph,
+                self.model,
+                start_states,
+                rollout_beam_config,
+                limit=int(self.config.rollout.num_envs),
+                expand_paths=True,
+            )
+            if target_set is None or len(target_set.batch) == 0:
+                raise RuntimeError("beam-evaluated rollout produced no solved rows.")
+            if self.search_archive is not None:
+                self.search_archive.add(target_set.batch)
+
+            source_batch = target_set.batch.to(self.device)
+            states = source_batch.states
+            target_actions = source_batch.action_targets.long()
+            target_costs = source_batch.value_targets.float()
+            with torch.no_grad():
+                old_outputs = forward_policy_value(self.model, states)
+                candidate_actions, candidate_mask = build_masked_action_candidates(
+                    old_outputs.logits,
+                    target_actions=target_actions,
+                    generator_indices=self.config.rollout.generator_indices,
+                    action_mode=str(self.config.beam_search.action_mode),
+                    action_top_k=int(self.config.beam_search.action_top_k),
+                    top_p=float(self.config.beam_search.top_p),
+                    min_actions=int(self.config.beam_search.min_actions),
+                    max_actions=self.config.beam_search.max_actions,
+                )
+                masked_evaluation = evaluate_masked_policy_actions(
+                    self.model,
+                    states,
+                    actions=None,
+                    candidate_actions=candidate_actions,
+                    candidate_mask=candidate_mask,
+                    action_temperature=float(self.config.rollout.action_temperature),
+                )
+                behavior_probs = self._beam_masked_behavior_probs(
+                    masked_log_probs=masked_evaluation.logits,
+                    candidate_actions=candidate_actions,
+                    candidate_mask=candidate_mask,
+                    target_actions=target_actions,
+                )
+                sampled_positions = torch.multinomial(
+                    behavior_probs.detach().cpu(),
+                    num_samples=1,
+                    replacement=True,
+                    generator=self._rollout_generator,
+                ).reshape(-1)
+                sampled_positions = sampled_positions.to(candidate_actions.device)
+                actions = torch.gather(
+                    candidate_actions,
+                    dim=1,
+                    index=sampled_positions.reshape(-1, 1),
+                ).reshape(-1)
+                old_log_probs = torch.log(
+                    torch
+                    .gather(
+                        behavior_probs,
+                        dim=1,
+                        index=sampled_positions.reshape(-1, 1),
+                    )
+                    .reshape(-1)
+                    .clamp_min(_ZERO_EPS)
+                )
+                old_values = masked_evaluation.values
+                cost_result = self._beam_evaluate_masked_actions(
+                    states=states,
+                    actions=actions,
+                    target_actions=target_actions,
+                    target_costs=target_costs,
+                    beam_config=rollout_beam_config,
+                )
+
+            keep_mask = cost_result.solved_mask
+            if not bool(keep_mask.any()):
+                raise RuntimeError("beam-evaluated rollout actions were all unsolved.")
+            kept_states = states[keep_mask].detach().cpu()
+            kept_actions = actions[keep_mask].detach().cpu()
+            kept_costs = cost_result.costs[keep_mask].detach().cpu()
+            kept_values = old_values[keep_mask].detach().cpu()
+            advantages = (old_values[keep_mask] - cost_result.costs[keep_mask]).detach()
+            rollout_batch = PolicyRolloutBatch(
+                states=kept_states,
+                actions=kept_actions,
+                log_probs=old_log_probs[keep_mask].detach().cpu(),
+                advantages=advantages.cpu(),
+                returns=kept_costs,
+                values=kept_values,
+                rewards=(-kept_costs).float(),
+                done=(kept_costs <= 1.0),
+                candidate_actions=candidate_actions[keep_mask].detach().cpu(),
+                candidate_mask=candidate_mask[keep_mask].detach().cpu(),
+            )
+            return _RolloutSummary(
+                rollout_batch=rollout_batch,
+                solve_rate=float(keep_mask.float().mean().detach().item()),
+                mean_reward=float((-kept_costs).mean().item()),
+                reward_step_cost_mean=0.0,
+                reward_solve_bonus_mean=0.0,
+                reward_teacher_progress_mean=0.0,
+                reward_inverse_penalty_mean=0.0,
+                reward_revisit_penalty_mean=0.0,
+                reward_search_bonus_mean=0.0,
+                beam_rollout_queries=int(target_stats.queried)
+                + int(cost_result.queried),
+                beam_rollout_successes=int(target_stats.path_found)
+                + int(cost_result.path_found),
+                beam_rollout_rows_added=len(rollout_batch),
+                beam_archive_queries=0,
+                beam_archive_successes=0,
+                beam_archive_rows_added=0,
+            )
+        finally:
+            self.model.train(was_training)
+
+    def _beam_masked_behavior_probs(
+        self,
+        *,
+        masked_log_probs: torch.Tensor,
+        candidate_actions: torch.Tensor,
+        candidate_mask: torch.Tensor,
+        target_actions: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Build the behavior distribution for masked beam-evaluated PPO.
+
+        Args:
+            masked_log_probs: Log-probabilities from the masked policy.
+            candidate_actions: Candidate generator ids.
+            candidate_mask: Boolean mask for valid candidate columns.
+            target_actions: Beam-path action for each row.
+
+        Returns:
+            Row-normalized behavior probabilities.
+        """
+        probs = masked_log_probs.exp().masked_fill(~candidate_mask, 0.0)
+        target_probability = float(self.config.rollout.beam_target_action_prob)
+        if target_probability <= 0.0:
+            return probs
+        behavior = probs * (1.0 - target_probability)
+        target_matches = (candidate_actions == target_actions.reshape(-1, 1)) & (
+            candidate_mask
+        )
+        target_positions = target_matches.float().argmax(dim=1).long()
+        behavior.scatter_add_(
+            dim=1,
+            index=target_positions.reshape(-1, 1),
+            src=torch.full(
+                (int(behavior.shape[0]), 1),
+                fill_value=target_probability,
+                device=behavior.device,
+                dtype=behavior.dtype,
+            ),
+        )
+        normalizer = behavior.sum(dim=1, keepdim=True).clamp_min(_ZERO_EPS)
+        return behavior / normalizer
+
+    def _beam_evaluate_masked_actions(  # noqa: PLR0914
+        self,
+        *,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        target_actions: torch.Tensor,
+        target_costs: torch.Tensor,
+        beam_config: Any,
+    ) -> _BeamActionCostResult:
+        """
+        Estimate cost returns for sampled masked actions with beam search.
+
+        Args:
+            states: Source states aligned with sampled actions.
+            actions: Sampled generator ids.
+            target_actions: Beam-path action for each state.
+            target_costs: Cost of following the solved beam path.
+            beam_config: Beam-search configuration used for off-path actions.
+
+        Returns:
+            Cost labels and accounting stats. Unsolved off-path actions receive
+            ``inf`` and are marked false in ``solved_mask``.
+        """
+        costs = torch.full_like(target_costs.float(), fill_value=float("inf"))
+        solved_mask = torch.zeros_like(target_costs, dtype=torch.bool)
+        target_match = actions.long() == target_actions.long()
+        if bool(target_match.any()):
+            costs[target_match] = target_costs[target_match].float()
+            solved_mask[target_match] = True
+
+        off_path_indices = torch.nonzero(~target_match, as_tuple=False).reshape(-1)
+        queried = 0
+        found = 0
+        if int(off_path_indices.numel()) == 0:
+            return _BeamActionCostResult(
+                costs=costs,
+                solved_mask=solved_mask,
+                queried=queried,
+                path_found=found,
+            )
+
+        next_states = apply_actions(
+            self.graph,
+            states.index_select(0, off_path_indices),
+            actions.index_select(0, off_path_indices),
+        )
+        center_mask = central_state_mask(next_states, self.graph.central_state)
+        if bool(center_mask.any()):
+            center_indices = off_path_indices[center_mask.to(off_path_indices.device)]
+            costs[center_indices] = 1.0
+            solved_mask[center_indices] = True
+
+        search_mask = ~center_mask
+        if bool(search_mask.any()):
+            search_indices = off_path_indices[search_mask.to(off_path_indices.device)]
+            search_states = next_states[search_mask]
+            target_set, stats = collect_beam_search_targets(
+                self.graph,
+                self.model,
+                search_states,
+                beam_config,
+                limit=None,
+                expand_paths=False,
+            )
+            queried += int(stats.queried)
+            found += int(stats.path_found)
+            if target_set is not None and len(target_set.batch) > 0:
+                local_indices = target_set.state_indices.long()
+                global_indices = search_indices.index_select(
+                    0,
+                    local_indices.to(search_indices.device),
+                )
+                path_lengths = target_set.path_lengths.to(costs.device).float()
+                costs[global_indices] = 1.0 + path_lengths
+                solved_mask[global_indices] = True
+        return _BeamActionCostResult(
+            costs=costs,
+            solved_mask=solved_mask,
+            queried=queried,
+            path_found=found,
+        )
+
     def _optimize_rollout(self, rollout_batch: PolicyRolloutBatch) -> dict[str, float]:
         """
         Run the PPO optimization epochs over one rollout batch.
@@ -727,13 +1003,26 @@ class SearchGuidedPPOTrainer:
             Tensor-valued PPO loss state.
 
         """
-        evaluation = evaluate_policy_actions(
-            self.model,
-            minibatch.states,
-            minibatch.actions,
-            generator_indices=self.config.rollout.generator_indices,
-            action_temperature=float(self.config.rollout.action_temperature),
-        )
+        if (
+            minibatch.candidate_actions is not None
+            and minibatch.candidate_mask is not None
+        ):
+            evaluation = evaluate_masked_policy_actions(
+                self.model,
+                minibatch.states,
+                minibatch.actions,
+                candidate_actions=minibatch.candidate_actions,
+                candidate_mask=minibatch.candidate_mask,
+                action_temperature=float(self.config.rollout.action_temperature),
+            )
+        else:
+            evaluation = evaluate_policy_actions(
+                self.model,
+                minibatch.states,
+                minibatch.actions,
+                generator_indices=self.config.rollout.generator_indices,
+                action_temperature=float(self.config.rollout.action_temperature),
+            )
         old_log_probs = minibatch.log_probs.to(self.device)
         ratios = torch.exp(evaluation.log_probs - old_log_probs)
         unclipped = ratios * minibatch_advantages

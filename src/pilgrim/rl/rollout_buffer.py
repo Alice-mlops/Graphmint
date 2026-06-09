@@ -9,6 +9,8 @@ import torch
 
 from .replay import _normalize_1d_tensor, _normalize_state_rows
 
+_EXPECTED_CANDIDATE_NDIM = 2
+
 
 @dataclass(slots=True, frozen=True)
 class PolicyRolloutBatch:
@@ -24,6 +26,9 @@ class PolicyRolloutBatch:
         values: Old value predictions with shape ``(batch,)``.
         rewards: Per-step rewards with shape ``(batch,)``.
         done: Terminal indicators aligned with transitions.
+        candidate_actions: Optional candidate generator ids for masked policy
+            evaluation with shape ``(batch, max_candidates)``.
+        candidate_mask: Optional mask marking valid candidate columns.
 
     """
 
@@ -35,6 +40,8 @@ class PolicyRolloutBatch:
     values: torch.Tensor
     rewards: torch.Tensor
     done: torch.Tensor
+    candidate_actions: torch.Tensor | None = None
+    candidate_mask: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         """
@@ -88,6 +95,30 @@ class PolicyRolloutBatch:
             dtype=torch.bool,
             name="done",
         )
+        candidate_actions = None
+        candidate_mask = None
+        if self.candidate_actions is not None or self.candidate_mask is not None:
+            if self.candidate_actions is None or self.candidate_mask is None:
+                raise ValueError(
+                    "candidate_actions and candidate_mask must be set together."
+                )
+            candidate_actions = torch.as_tensor(
+                self.candidate_actions,
+                device=state_device,
+                dtype=torch.long,
+            )
+            candidate_mask = torch.as_tensor(
+                self.candidate_mask,
+                device=state_device,
+                dtype=torch.bool,
+            )
+            if (
+                candidate_actions.ndim != _EXPECTED_CANDIDATE_NDIM
+                or candidate_mask.ndim != _EXPECTED_CANDIDATE_NDIM
+            ):
+                raise ValueError("candidate action tensors must be two-dimensional.")
+            if tuple(candidate_actions.shape) != tuple(candidate_mask.shape):
+                raise ValueError("candidate_actions must align with candidate_mask.")
         batch_size = int(batch_states.shape[0])
         for name, tensor in [
             ("actions", batch_actions),
@@ -108,6 +139,14 @@ class PolicyRolloutBatch:
         object.__setattr__(self, "values", batch_values)
         object.__setattr__(self, "rewards", batch_rewards)
         object.__setattr__(self, "done", batch_done)
+        if candidate_actions is not None and candidate_mask is not None:
+            if int(candidate_actions.shape[0]) != batch_size:
+                raise ValueError("candidate actions must align with states.")
+            valid_counts = candidate_mask.sum(dim=1)
+            if bool((valid_counts <= 0).any()):
+                raise ValueError("each row needs at least one candidate action.")
+            object.__setattr__(self, "candidate_actions", candidate_actions)
+            object.__setattr__(self, "candidate_mask", candidate_mask)
 
     def __len__(self) -> int:
         """
@@ -140,6 +179,12 @@ class PolicyRolloutBatch:
             values=self.values.to(target_device),
             rewards=self.rewards.to(target_device),
             done=self.done.to(target_device),
+            candidate_actions=None
+            if self.candidate_actions is None
+            else self.candidate_actions.to(target_device),
+            candidate_mask=None
+            if self.candidate_mask is None
+            else self.candidate_mask.to(target_device),
         )
 
     def index_select(self, indices: torch.Tensor) -> PolicyRolloutBatch:
@@ -163,6 +208,12 @@ class PolicyRolloutBatch:
             values=self.values.index_select(0, rows),
             rewards=self.rewards.index_select(0, rows),
             done=self.done.index_select(0, rows),
+            candidate_actions=None
+            if self.candidate_actions is None
+            else self.candidate_actions.index_select(0, rows),
+            candidate_mask=None
+            if self.candidate_mask is None
+            else self.candidate_mask.index_select(0, rows),
         )
 
 
