@@ -623,23 +623,35 @@ class SearchGuidedPPOTrainer:
         was_training = self.model.training
         self.model.eval()
         try:
-            start_states = self._sample_rollout_start_states()
             rollout_beam_config = self.config.beam_search.model_copy(
                 update={
                     "archive_path_targets": True,
                     "archive_neighbor_targets": False,
                 },
             )
-            target_set, target_stats = collect_beam_search_targets(
-                self.graph,
-                self.model,
-                start_states,
-                rollout_beam_config,
-                limit=int(self.config.rollout.num_envs),
-                expand_paths=True,
-            )
+            target_set: BeamSearchTargetSet | None = None
+            target_queries = 0
+            target_successes = 0
+            for _ in range(int(self.config.rollout.beam_retry_attempts)):
+                start_states = self._sample_rollout_start_states()
+                candidate_set, target_stats = collect_beam_search_targets(
+                    self.graph,
+                    self.model,
+                    start_states,
+                    rollout_beam_config,
+                    limit=int(self.config.rollout.num_envs),
+                    expand_paths=True,
+                )
+                target_queries += int(target_stats.queried)
+                target_successes += int(target_stats.path_found)
+                if candidate_set is not None and len(candidate_set.batch) > 0:
+                    target_set = candidate_set
+                    break
             if target_set is None or len(target_set.batch) == 0:
-                raise RuntimeError("beam-evaluated rollout produced no solved rows.")
+                raise RuntimeError(
+                    "beam-evaluated rollout produced no solved rows after "
+                    f"{int(self.config.rollout.beam_retry_attempts)} attempts."
+                )
             if self.search_archive is not None:
                 self.search_archive.add(target_set.batch)
 
@@ -734,9 +746,8 @@ class SearchGuidedPPOTrainer:
                 reward_inverse_penalty_mean=0.0,
                 reward_revisit_penalty_mean=0.0,
                 reward_search_bonus_mean=0.0,
-                beam_rollout_queries=int(target_stats.queried)
-                + int(cost_result.queried),
-                beam_rollout_successes=int(target_stats.path_found)
+                beam_rollout_queries=int(target_queries) + int(cost_result.queried),
+                beam_rollout_successes=int(target_successes)
                 + int(cost_result.path_found),
                 beam_rollout_rows_added=len(rollout_batch),
                 beam_archive_queries=0,

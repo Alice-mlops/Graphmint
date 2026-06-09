@@ -37,6 +37,8 @@ class SearchGuidedPPORolloutConfig(BaseModel):
         beam_target_action_prob: Probability of sampling the beam-path target
             action in ``"beam_evaluated"`` mode. The remaining probability mass
             follows the masked policy distribution.
+        beam_retry_attempts: Number of random-walk batches tried when
+            ``"beam_evaluated"`` rollout does not find any solved beam path.
         generator_indices: Optional subset of legal generator ids.
         sampling: Random-walk sampling config used to draw rollout start states.
 
@@ -51,6 +53,7 @@ class SearchGuidedPPORolloutConfig(BaseModel):
     max_episode_steps: int = Field(128, ge=1)
     action_temperature: float = Field(1.0, gt=0.0)
     beam_target_action_prob: float = Field(0.0, ge=0.0, le=1.0)
+    beam_retry_attempts: int = Field(1, ge=1)
     generator_indices: tuple[int, ...] | None = None
     sampling: TDRandomWalkSamplingConfig = Field(
         default_factory=TDRandomWalkSamplingConfig
@@ -390,6 +393,7 @@ class SearchGuidedPPOConfig(BaseModel):
             "rollout.beam_target_action_prob": float(
                 self.rollout.beam_target_action_prob
             ),
+            "rollout.beam_retry_attempts": int(self.rollout.beam_retry_attempts),
             "rollout.generator_indices": None
             if self.rollout.generator_indices is None
             else list(self.rollout.generator_indices),
