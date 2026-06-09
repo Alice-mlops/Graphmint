@@ -42,6 +42,10 @@ class RandomWalkSamplingConfig:
         rw_width: Base width used for one refresh call.
         rw_length: Base walk length used for the default schedule.
         rw_lengths: Optional explicit schedule of ``(factor, length)`` pairs.
+        step_sampling: Which random-walk levels to keep from each generated
+            walk block.
+        suffix_fraction: Fraction of terminal levels kept when
+            ``step_sampling`` is ``"suffix"``.
         seed: Base random seed for walk sampling.
 
     """
@@ -50,6 +54,8 @@ class RandomWalkSamplingConfig:
     rw_width: int = 256
     rw_length: int = 24
     rw_lengths: list[tuple[float, int]] | None = None
+    step_sampling: str = "all"
+    suffix_fraction: float = 1.0
     seed: int = 42
 
 

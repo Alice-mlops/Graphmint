@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .parallel import TDParallelConfig
+
+RandomWalkStepSamplingMode = Literal["all", "suffix", "final"]
 
 
 class TDReplayBufferConfig(BaseModel):
@@ -44,6 +46,10 @@ class TDRandomWalkSamplingConfig(BaseModel):
         rw_width: Base random-walk width used during sampling.
         rw_length: Base random-walk length used by the default schedule.
         rw_lengths: Optional explicit schedule of ``(factor, length)`` pairs.
+        step_sampling: Which random-walk levels to keep from each generated
+            walk block.
+        suffix_fraction: Fraction of terminal levels kept when
+            ``step_sampling`` is ``"suffix"``.
         seed: Base random seed used for replay sampling.
 
     """
@@ -54,6 +60,8 @@ class TDRandomWalkSamplingConfig(BaseModel):
     rw_width: int = Field(256, ge=1)
     rw_length: int = Field(24, ge=1)
     rw_lengths: tuple[tuple[float, int], ...] | None = None
+    step_sampling: RandomWalkStepSamplingMode = "all"
+    suffix_fraction: float = Field(1.0, gt=0.0, le=1.0)
     seed: int = 42
 
 
@@ -400,6 +408,8 @@ class MultiStepTDValueConfig(BaseModel):
             "sampling.rw_lengths": None
             if self.sampling.rw_lengths is None
             else [tuple(item) for item in self.sampling.rw_lengths],
+            "sampling.step_sampling": str(self.sampling.step_sampling),
+            "sampling.suffix_fraction": float(self.sampling.suffix_fraction),
             "sampling.seed": int(self.sampling.seed),
             "frontier.capacity": int(self.frontier.capacity),
             "frontier.batch_size": int(self.frontier.batch_size),

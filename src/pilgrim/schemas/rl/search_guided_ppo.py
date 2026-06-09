@@ -407,6 +407,10 @@ class SearchGuidedPPOConfig(BaseModel):
             "rollout.sampling.rw_lengths": None
             if self.rollout.sampling.rw_lengths is None
             else [tuple(item) for item in self.rollout.sampling.rw_lengths],
+            "rollout.sampling.step_sampling": str(self.rollout.sampling.step_sampling),
+            "rollout.sampling.suffix_fraction": float(
+                self.rollout.sampling.suffix_fraction
+            ),
             "rollout.sampling.seed": int(self.rollout.sampling.seed),
             "reward.step_cost": float(self.reward.step_cost),
             "reward.solve_bonus": float(self.reward.solve_bonus),

@@ -85,6 +85,17 @@ def sample_states_with_lengths_from_random_walks(
             nbt_history_depth=int(length),
         )
         state_part = torch.as_tensor(x_part).long()
+        step_labels = _steps_for_state_rows(
+            fallback_length=int(length),
+            row_count=int(state_part.shape[0]),
+            raw_steps=step_part,
+        )
+        state_part, step_labels = _filter_state_rows_by_step(
+            states=state_part,
+            steps=step_labels,
+            step_sampling=str(getattr(config, "step_sampling", "all")),
+            suffix_fraction=float(getattr(config, "suffix_fraction", 1.0)),
+        )
         states.append(state_part)
         lengths.append(
             _lengths_for_state_rows(
@@ -92,13 +103,7 @@ def sample_states_with_lengths_from_random_walks(
                 row_count=int(state_part.shape[0]),
             )
         )
-        steps.append(
-            _steps_for_state_rows(
-                fallback_length=int(length),
-                row_count=int(state_part.shape[0]),
-                raw_steps=step_part,
-            )
-        )
+        steps.append(step_labels)
 
     if not states:
         x_part, step_part = graph.random_walks(
@@ -108,6 +113,17 @@ def sample_states_with_lengths_from_random_walks(
             nbt_history_depth=int(config.rw_length),
         )
         state_part = torch.as_tensor(x_part).long()
+        step_labels = _steps_for_state_rows(
+            fallback_length=int(config.rw_length),
+            row_count=int(state_part.shape[0]),
+            raw_steps=step_part,
+        )
+        state_part, step_labels = _filter_state_rows_by_step(
+            states=state_part,
+            steps=step_labels,
+            step_sampling=str(getattr(config, "step_sampling", "all")),
+            suffix_fraction=float(getattr(config, "suffix_fraction", 1.0)),
+        )
         states.append(state_part)
         lengths.append(
             _lengths_for_state_rows(
@@ -115,13 +131,7 @@ def sample_states_with_lengths_from_random_walks(
                 row_count=int(state_part.shape[0]),
             )
         )
-        steps.append(
-            _steps_for_state_rows(
-                fallback_length=int(config.rw_length),
-                row_count=int(state_part.shape[0]),
-                raw_steps=step_part,
-            )
-        )
+        steps.append(step_labels)
 
     return RandomWalkStateSample(
         states=torch.cat(states, dim=0),
@@ -177,6 +187,50 @@ def _steps_for_state_rows(
         fill_value=int(fallback_length),
         dtype=torch.long,
     )
+
+
+def _filter_state_rows_by_step(
+    *,
+    states: torch.Tensor,
+    steps: torch.Tensor,
+    step_sampling: str,
+    suffix_fraction: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Filter random-walk rows by their actual walk step.
+
+    Args:
+        states: State rows returned by ``CayleyGraph.random_walks``.
+        steps: One-dimensional step labels aligned with ``states``.
+        step_sampling: Row-selection mode: ``"all"``, ``"suffix"``, or
+            ``"final"``.
+        suffix_fraction: Fraction of terminal levels kept in ``"suffix"``
+            mode.
+
+    Returns:
+        Filtered state rows and aligned step labels.
+
+    Raises:
+        ValueError: If the sampling mode or suffix fraction is invalid.
+    """
+    mode = str(step_sampling)
+    if mode == "all":
+        return states, steps
+    if not 0.0 < float(suffix_fraction) <= 1.0:
+        raise ValueError("suffix_fraction must be in the open interval (0, 1].")
+    if steps.numel() == 0:
+        return states, steps
+
+    max_step = int(steps.max().item())
+    if mode == "final":
+        mask = steps >= max_step
+    elif mode == "suffix":
+        keep_levels = max(1, math.ceil(float(max_step + 1) * float(suffix_fraction)))
+        min_step = max(0, max_step - keep_levels + 1)
+        mask = steps >= min_step
+    else:
+        raise ValueError("step_sampling must be one of 'all', 'suffix', or 'final'.")
+    return states[mask].contiguous(), steps[mask].contiguous()
 
 
 def sample_suffix_states_from_random_walks(
