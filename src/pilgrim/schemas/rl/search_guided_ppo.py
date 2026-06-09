@@ -265,6 +265,8 @@ class SearchGuidedPPOConfig(BaseModel):
         value_clip_ratio: Optional clipping threshold for the value head.
         value_coef: Multiplier applied to the PPO value-regression term.
         entropy_coef: Entropy bonus multiplier.
+        policy_anchor_coef: KL multiplier that keeps the policy near a frozen
+            teacher/reference model when one is provided to the trainer.
         target_kl: Optional early-stop threshold on approximate KL divergence.
         num_policy_epochs: Number of SGD passes over each rollout batch.
         minibatch_size: Minibatch size used during PPO optimization.
@@ -300,6 +302,7 @@ class SearchGuidedPPOConfig(BaseModel):
     value_clip_ratio: float | None = Field(default=None, gt=0.0)
     value_coef: float = Field(0.5, ge=0.0)
     entropy_coef: float = Field(0.01, ge=0.0)
+    policy_anchor_coef: float = Field(0.0, ge=0.0)
     target_kl: float | None = Field(default=None, gt=0.0)
     num_policy_epochs: int = Field(4, ge=1)
     minibatch_size: int = Field(512, ge=1)
@@ -371,6 +374,7 @@ class SearchGuidedPPOConfig(BaseModel):
             "value_clip_ratio": self.value_clip_ratio,
             "value_coef": float(self.value_coef),
             "entropy_coef": float(self.entropy_coef),
+            "policy_anchor_coef": float(self.policy_anchor_coef),
             "target_kl": self.target_kl,
             "num_policy_epochs": int(self.num_policy_epochs),
             "minibatch_size": int(self.minibatch_size),
@@ -530,6 +534,8 @@ class SearchGuidedPPOLossState(BaseModel):
         value_loss: PPO value-regression loss.
         entropy: Mean policy entropy.
         auxiliary_loss: Sum of auxiliary supervised losses.
+        policy_anchor_loss: KL loss that keeps the policy near the frozen
+            teacher/reference model.
         approx_kl: Approximate KL divergence against the rollout policy.
         clip_fraction: Fraction of samples clipped by the PPO ratio bound.
 
@@ -542,6 +548,7 @@ class SearchGuidedPPOLossState(BaseModel):
     value_loss: torch.Tensor
     entropy: torch.Tensor
     auxiliary_loss: torch.Tensor
+    policy_anchor_loss: torch.Tensor
     approx_kl: torch.Tensor
     clip_fraction: torch.Tensor
 
@@ -557,6 +564,7 @@ class SearchGuidedPPOStepDiagnostics(BaseModel):
         value_loss: Mean PPO value loss across minibatches.
         entropy: Mean policy entropy across minibatches.
         auxiliary_loss: Mean auxiliary supervised loss across minibatches.
+        policy_anchor_loss: Mean policy-anchor KL across minibatches.
         approx_kl: Mean approximate KL divergence.
         clip_fraction: Mean PPO clip fraction.
         rollout_size: Number of valid rollout transitions.
@@ -594,6 +602,7 @@ class SearchGuidedPPOStepDiagnostics(BaseModel):
     value_loss: float
     entropy: float
     auxiliary_loss: float
+    policy_anchor_loss: float
     approx_kl: float
     clip_fraction: float
     rollout_size: int = Field(..., ge=0)

@@ -10,6 +10,9 @@ from pilgrim.rl.helpers import (
     evaluate_masked_policy_actions,
     sample_masked_policy_actions,
 )
+from pilgrim.rl.search_guided_ppo import (
+    _distribution_kl_from_log_probs,  # noqa: PLC2701
+)
 
 OUTSIDE_TOPK_TARGET = 3
 
@@ -125,3 +128,31 @@ def test_policy_rollout_batch_preserves_candidate_masks_on_select() -> None:
     assert selected.candidate_mask is not None
     assert selected.candidate_actions.tolist() == [[1, 0]]
     assert selected.candidate_mask.tolist() == [[True, True]]
+
+
+def test_distribution_kl_uses_candidate_mask() -> None:
+    """Check that anchor KL ignores padded invalid candidate columns."""
+    reference = torch.log_softmax(
+        torch.tensor([[2.0, 0.0, -1000.0]], dtype=torch.float32),
+        dim=1,
+    )
+    current_same = reference.clone()
+    current_shifted = torch.log_softmax(
+        torch.tensor([[0.0, 2.0, -1000.0]], dtype=torch.float32),
+        dim=1,
+    )
+    mask = torch.tensor([[True, True, False]])
+
+    same_kl = _distribution_kl_from_log_probs(
+        reference_log_probs=reference,
+        current_log_probs=current_same,
+        mask=mask,
+    )
+    shifted_kl = _distribution_kl_from_log_probs(
+        reference_log_probs=reference,
+        current_log_probs=current_shifted,
+        mask=mask,
+    )
+
+    assert torch.allclose(same_kl, torch.tensor(0.0))
+    assert shifted_kl.item() > 0.0

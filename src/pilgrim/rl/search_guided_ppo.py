@@ -10,6 +10,7 @@ from typing import Any
 import torch
 from cayleypy import CayleyGraph
 from torch import nn
+from torch.nn import functional
 
 from pilgrim.schemas.rl.search_guided_ppo import (
     SearchGuidedPPOConfig,
@@ -28,7 +29,12 @@ from .helpers.ppo import (
     normalize_advantages,
     sample_policy_actions,
 )
-from .helpers.q_learning import _graph_device, _resolve_graph_inverse_map, apply_actions
+from .helpers.q_learning import (
+    _graph_device,
+    _resolve_action_indices,
+    _resolve_graph_inverse_map,
+    apply_actions,
+)
 from .helpers.search_guidance import (
     BeamSearchTargetSet,
     BeamSearchTargetStats,
@@ -76,6 +82,44 @@ class _BeamActionCostResult:
     solved_mask: torch.Tensor
     queried: int
     path_found: int
+
+
+def _distribution_kl_from_log_probs(
+    *,
+    reference_log_probs: torch.Tensor,
+    current_log_probs: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Compute row-mean KL(reference || current) from log-probability tables.
+
+    Args:
+        reference_log_probs: Frozen reference log probabilities.
+        current_log_probs: Trainable policy log probabilities.
+        mask: Optional valid-column mask for padded candidate distributions.
+
+    Returns:
+        Scalar mean KL divergence across rows.
+
+    Raises:
+        ValueError: If the log-probability shapes do not match.
+    """
+    if tuple(reference_log_probs.shape) != tuple(current_log_probs.shape):
+        raise ValueError("reference and current log-probability tables must align.")
+    if mask is None:
+        reference_probs = reference_log_probs.exp()
+        return (
+            (reference_probs * (reference_log_probs - current_log_probs))
+            .sum(dim=1)
+            .mean()
+        )
+    valid = torch.as_tensor(mask, device=current_log_probs.device, dtype=torch.bool)
+    if tuple(valid.shape) != tuple(current_log_probs.shape):
+        raise ValueError("mask must align with log-probability tables.")
+    reference_safe = reference_log_probs.masked_fill(~valid, 0.0)
+    current_safe = current_log_probs.masked_fill(~valid, 0.0)
+    reference_probs = reference_log_probs.exp().masked_fill(~valid, 0.0)
+    return (reference_probs * (reference_safe - current_safe)).sum(dim=1).mean()
 
 
 class SearchGuidedPPOTrainer:
@@ -289,6 +333,7 @@ class SearchGuidedPPOTrainer:
             value_loss=float(optimize_stats["value_loss"]),
             entropy=float(optimize_stats["entropy"]),
             auxiliary_loss=float(optimize_stats["auxiliary_loss"]),
+            policy_anchor_loss=float(optimize_stats["policy_anchor_loss"]),
             approx_kl=float(optimize_stats["approx_kl"]),
             clip_fraction=float(optimize_stats["clip_fraction"]),
             rollout_size=rollout_size,
@@ -900,6 +945,7 @@ class SearchGuidedPPOTrainer:
             "value_loss": 0.0,
             "entropy": 0.0,
             "auxiliary_loss": 0.0,
+            "policy_anchor_loss": 0.0,
             "approx_kl": 0.0,
             "clip_fraction": 0.0,
             "num_minibatches": 0.0,
@@ -940,6 +986,9 @@ class SearchGuidedPPOTrainer:
                 statistics["auxiliary_loss"] += float(
                     loss_state.auxiliary_loss.detach().item()
                 )
+                statistics["policy_anchor_loss"] += float(
+                    loss_state.policy_anchor_loss.detach().item()
+                )
                 statistics["approx_kl"] += float(loss_state.approx_kl.detach().item())
                 statistics["clip_fraction"] += float(
                     loss_state.clip_fraction.detach().item()
@@ -971,6 +1020,7 @@ class SearchGuidedPPOTrainer:
             "value_loss": 0.0,
             "entropy": 0.0,
             "auxiliary_loss": 0.0,
+            "policy_anchor_loss": 0.0,
             "approx_kl": 0.0,
             "clip_fraction": 0.0,
             "num_updates": 0.0,
@@ -1076,12 +1126,14 @@ class SearchGuidedPPOTrainer:
 
         auxiliary_loss = torch.zeros((), device=self.device, dtype=torch.float32)
         auxiliary_loss += self._sample_auxiliary_supervision_loss()
+        policy_anchor_loss = self._compute_policy_anchor_loss(minibatch, evaluation)
 
         total_loss = (
             policy_loss
             + float(self.config.value_coef) * value_loss
             - float(self.config.entropy_coef) * entropy
             + auxiliary_loss
+            + float(self.config.policy_anchor_coef) * policy_anchor_loss
         )
         return SearchGuidedPPOLossState(
             total_loss=total_loss,
@@ -1089,8 +1141,63 @@ class SearchGuidedPPOTrainer:
             value_loss=value_loss,
             entropy=entropy,
             auxiliary_loss=auxiliary_loss,
+            policy_anchor_loss=policy_anchor_loss,
             approx_kl=approx_kl,
             clip_fraction=clip_fraction,
+        )
+
+    def _compute_policy_anchor_loss(
+        self,
+        minibatch: PolicyRolloutBatch,
+        evaluation: Any,
+    ) -> torch.Tensor:
+        """
+        Compute KL(reference || current) against the frozen teacher policy.
+
+        Args:
+            minibatch: Rollout minibatch used for PPO.
+            evaluation: Current-policy evaluation aligned with the minibatch.
+
+        Returns:
+            Scalar KL loss. Returns zero when no teacher or coefficient is set.
+        """
+        if self.teacher_model is None or float(self.config.policy_anchor_coef) <= 0.0:
+            return torch.zeros((), device=self.device, dtype=torch.float32)
+        if (
+            minibatch.candidate_actions is not None
+            and minibatch.candidate_mask is not None
+        ):
+            with torch.no_grad():
+                teacher_evaluation = evaluate_masked_policy_actions(
+                    self.teacher_model,
+                    minibatch.states,
+                    actions=None,
+                    candidate_actions=minibatch.candidate_actions,
+                    candidate_mask=minibatch.candidate_mask,
+                    action_temperature=float(self.config.rollout.action_temperature),
+                )
+            return _distribution_kl_from_log_probs(
+                reference_log_probs=teacher_evaluation.logits,
+                current_log_probs=evaluation.logits,
+                mask=minibatch.candidate_mask,
+            )
+
+        with torch.no_grad():
+            teacher_outputs = forward_policy_value(self.teacher_model, minibatch.states)
+        allowed = _resolve_action_indices(
+            num_actions=int(evaluation.logits.shape[1]),
+            generator_indices=self.config.rollout.generator_indices,
+            device=evaluation.logits.device,
+        )
+        teacher_logits = teacher_outputs.logits.index_select(1, allowed) / float(
+            self.config.rollout.action_temperature
+        )
+        current_logits = evaluation.logits.index_select(1, allowed) / float(
+            self.config.rollout.action_temperature
+        )
+        return _distribution_kl_from_log_probs(
+            reference_log_probs=functional.log_softmax(teacher_logits, dim=1),
+            current_log_probs=functional.log_softmax(current_logits, dim=1),
         )
 
     def _sample_auxiliary_supervision_loss(self) -> torch.Tensor:

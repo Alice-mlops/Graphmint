@@ -13,6 +13,7 @@ ACTION_TOP_K = 4
 POLICY_PRESELECT_FACTOR = 2.0
 RECOVERY_NEIGHBOR_TOP_K = 4
 RECOVERY_NEIGHBOR_MAX_ROWS = 64
+POLICY_ANCHOR_COEF = 0.375
 
 
 class ForwardValueOnlyModel(torch.nn.Module):
@@ -113,3 +114,13 @@ def test_search_guided_ppo_recovery_neighbor_config_is_logged() -> None:
         == RECOVERY_NEIGHBOR_MAX_ROWS
     )
     assert log_dict["beam.archive_neighbor_exclude_path_action"] is False
+
+
+def test_search_guided_ppo_policy_anchor_config_is_logged() -> None:
+    """Check that the policy-anchor coefficient survives schema logging."""
+    config = SearchGuidedPPOConfig(policy_anchor_coef=POLICY_ANCHOR_COEF)
+
+    log_dict = config.to_log_dict()
+
+    assert config.policy_anchor_coef == pytest.approx(POLICY_ANCHOR_COEF)
+    assert log_dict["policy_anchor_coef"] == pytest.approx(POLICY_ANCHOR_COEF)
