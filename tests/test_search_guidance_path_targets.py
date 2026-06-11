@@ -8,6 +8,7 @@ import pytest
 import torch
 from cayleypy import CayleyGraph
 from cayleypy.graphs_lib import PermutationGroups
+
 from pilgrim.rl.helpers import search_guidance
 from pilgrim.rl.helpers.path_recovery_sampling import (
     sample_policy_recovery_neighbor_rows,
@@ -76,6 +77,18 @@ def test_select_path_target_positions_applies_stride_and_even_cap() -> None:
     )
 
     assert positions == [0, 4, 8]
+
+
+def test_select_path_target_positions_can_front_load_cap() -> None:
+    """Front-loaded caps should keep high-remaining-distance path states."""
+    positions = search_guidance._select_path_target_positions(
+        path_length=10,
+        stride=2,
+        max_rows=3,
+        position_mode="front_loaded",
+    )
+
+    assert positions == [0, 2, 4]
 
 
 def test_path_length_statistics_use_source_path_lengths() -> None:

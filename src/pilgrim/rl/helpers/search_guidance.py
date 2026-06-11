@@ -313,6 +313,7 @@ def _append_beam_path_supervision(
         path_length=len(path),
         stride=int(config.archive_path_stride),
         max_rows=config.archive_max_path_rows_per_solve,
+        position_mode=str(config.archive_path_position_mode),
     )
     if not positions:
         return
@@ -378,6 +379,7 @@ def _select_path_target_positions(
     path_length: int,
     stride: int,
     max_rows: int | None,
+    position_mode: str = "even",
 ) -> list[int]:
     """
     Select path positions whose pre-action states become supervision rows.
@@ -386,6 +388,9 @@ def _select_path_target_positions(
         path_length: Number of actions in the solved path.
         stride: Keep every Nth pre-action state.
         max_rows: Optional cap after stride selection.
+        position_mode: Capped-position strategy. ``"even"`` spreads retained
+            states across the path; ``"front_loaded"`` keeps the earliest
+            states, which have the largest remaining distance.
 
     Returns:
         Zero-based action positions to keep.
@@ -397,6 +402,8 @@ def _select_path_target_positions(
     if max_rows is None or len(positions) <= int(max_rows):
         return positions
     cap = max(1, int(max_rows))
+    if str(position_mode) == "front_loaded":
+        return positions[:cap]
     if cap == 1:
         return [positions[0]]
     step = float(len(positions) - 1) / float(cap - 1)

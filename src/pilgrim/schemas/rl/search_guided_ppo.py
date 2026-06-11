@@ -18,6 +18,7 @@ BeamMode = Literal["simple", "advanced", "iterated", "topk", "policy_topk"]
 RolloutMode = Literal["policy", "beam_evaluated"]
 ActionSelectionMode = Literal["topk", "topp"]
 PathTargetWeightMode = Literal["uniform", "per_path_normalized"]
+PathTargetPositionMode = Literal["even", "front_loaded"]
 
 
 class SearchGuidedPPORolloutConfig(BaseModel):
@@ -153,6 +154,9 @@ class SearchGuidedPPOBeamSearchConfig(BaseModel):
         archive_max_path_rows_per_solve: Optional cap on rows added from one
             solved path after stride selection.
         archive_path_weight_mode: Per-row weighting for path-expanded targets.
+        archive_path_position_mode: How capped path positions are selected.
+            ``"even"`` spreads rows across the path; ``"front_loaded"`` keeps
+            high-remaining-distance rows near the start of the solved path.
         archive_neighbor_targets: Whether solved path states should also add
             one-hop recovery-neighbor targets.
         archive_neighbor_top_k: Number of policy-ranked perturbation actions
@@ -195,6 +199,7 @@ class SearchGuidedPPOBeamSearchConfig(BaseModel):
     archive_path_stride: int = Field(1, ge=1)
     archive_max_path_rows_per_solve: int | None = Field(default=None, ge=1)
     archive_path_weight_mode: PathTargetWeightMode = "per_path_normalized"
+    archive_path_position_mode: PathTargetPositionMode = "even"
     archive_neighbor_targets: bool = False
     archive_neighbor_top_k: int = Field(0, ge=0)
     archive_neighbor_weight: float = Field(0.25, ge=0.0)
@@ -467,6 +472,9 @@ class SearchGuidedPPOConfig(BaseModel):
             ),
             "beam.archive_path_weight_mode": str(
                 self.beam_search.archive_path_weight_mode
+            ),
+            "beam.archive_path_position_mode": str(
+                self.beam_search.archive_path_position_mode
             ),
             "beam.archive_neighbor_targets": bool(
                 self.beam_search.archive_neighbor_targets
