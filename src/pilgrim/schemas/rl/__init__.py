@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from .awac import AWACConfig, AWACSetLossMode
 from .distributed_run import DistributedMultiStepTDRunSpec
 from .multistep_ddqn import (
     MultiStepDDQNConfig,
@@ -38,6 +39,8 @@ from .search_guided_ppo import (
 from .tracking import TDFileTrackerConfig, TDProbeEvaluationConfig
 
 __all__ = [
+    "AWACConfig",
+    "AWACSetLossMode",
     "DistributedMultiStepTDRunSpec",
     "MultiStepDDQNConfig",
     "MultiStepDDQNLossState",

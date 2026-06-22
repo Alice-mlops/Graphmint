@@ -123,6 +123,55 @@ What is “cosine with restarts”?
 - After each restart, the cycle length becomes `t0 * (t_mult ** k)` for restart
   index \(k\) (so cycles can get longer over time).
 
+## Generic Discrete AWAC
+
+`pilgrim.rl.awac` implements a graph-generic advantage-weighted actor-critic
+loss for discrete action spaces. The loss is independent of Pancake/CayleyPy
+state generation: callers provide policy logits, optional scalar values, legal
+action masks, and target action information.
+
+Main API:
+
+```python
+from pilgrim.rl import AWACConfig, AWACTargetBatch, compute_awac_loss
+
+targets = AWACTargetBatch(
+    optimal_action_mask=optimal_mask,  # bool[batch, actions]
+    advantages=advantages,            # optional row or per-action tensor
+    action_mask=legal_action_mask,     # optional bool[batch, actions]
+    value_targets=distances,           # optional scalar targets
+    reference_log_probs=old_log_probs, # optional KL anchor
+    bad_action_mask=bad_mask,          # optional known strictly bad actions
+)
+loss_state = compute_awac_loss(
+    logits=policy_logits,
+    values=value_predictions,
+    targets=targets,
+    config=AWACConfig(
+        set_loss_mode="set_probability",
+        policy_anchor_coef=1.0,
+        value_coef=0.02,
+    ),
+)
+loss_state.total_loss.backward()
+```
+
+Target modes:
+
+- `set_loss_mode="set_probability"` optimizes
+  `-log(sum(pi(a | s) for a in optimal_actions))`. Use this when a graph state
+  can have several equally good shortest-path actions, for example in Schreier
+  graphs with many cycles.
+- `set_loss_mode="uniform_targets"` applies uniform cross-entropy over the
+  optimal action set. This is stricter and may overconstrain equivalent actions.
+- `bad_action_mask` is only for actions known to be strictly worse, such as a
+  neighbor with exact distance `d(s) + 1`. Unknown actions should stay unmasked
+  rather than being treated as negatives.
+
+Diagnostics returned by `AWACLossState` include policy/value losses, entropy,
+anchor KL, bad-action probability, total optimal-action probability, greedy
+top-1-in-optimal-set accuracy, and AWAC weight statistics.
+
 ## RL fitted value iteration and Aim metrics
 
 The notebook `pancake_v_iteration_n19.ipynb` uses the RL utilities in

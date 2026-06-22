@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from ..schemas.rl import (
+    AWACConfig,
+    AWACSetLossMode,
     DistributedMultiStepTDRunSpec,
     MultiStepDDQNConfig,
     MultiStepDDQNLossState,
@@ -33,6 +35,14 @@ from ..schemas.rl import (
     TDReplayBufferConfig,
     TDSecondaryGpuEvalConfig,
     TDTargetSamplingConfig,
+)
+from .awac import (
+    AWACLossState,
+    AWACTargetBatch,
+    awac_metrics_to_float,
+    compute_awac_actor_critic_loss,
+    compute_awac_loss,
+    merge_awac_metrics,
 )
 from .composite_tracking import CompositeMultiStepTDValueTracker
 from .config import (
@@ -134,6 +144,10 @@ from .transitions import (
 )
 
 __all__ = [
+    "AWACConfig",
+    "AWACLossState",
+    "AWACSetLossMode",
+    "AWACTargetBatch",
     "BeamSearchTargetSet",
     "BeamSearchTargetStats",
     "CompositeMultiStepTDValueTracker",
@@ -197,10 +211,13 @@ __all__ = [
     "TransitionBatch",
     "TransitionReplayBuffer",
     "apply_actions",
+    "awac_metrics_to_float",
     "beam_action_reward_bonus",
     "build_masked_action_candidates",
     "collect_beam_search_targets",
     "combine_truncated_td_lambda_targets",
+    "compute_awac_actor_critic_loss",
+    "compute_awac_loss",
     "compute_bellman_value_targets",
     "compute_double_q_targets_from_transition_batch",
     "compute_lipschitz_actor_critic_loss",
@@ -232,6 +249,7 @@ __all__ = [
     "is_main_process",
     "load_model_state_dict",
     "local_rank_from_env",
+    "merge_awac_metrics",
     "model_output_dim",
     "normalize_advantages",
     "predict_state_scores",
